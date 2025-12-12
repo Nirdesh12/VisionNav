@@ -1,6 +1,7 @@
 {
   "images" : [
     {
+      "filename" : "white.jpeg",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -12,6 +13,7 @@
           "value" : "dark"
         }
       ],
+      "filename" : "dark.jpeg",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
