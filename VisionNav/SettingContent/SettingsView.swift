@@ -1,5 +1,5 @@
 //
-// SettingView.swift - Simplified for Accessibility
+// SettingView.swift - Fixed and Optimized
 //
 import SwiftUI
 import Foundation
@@ -19,85 +19,86 @@ struct SettingView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 30) {
+        ZStack {
+            // Background
+            groupedBackgroundColor.ignoresSafeArea()
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 30) {
 
-                // --- Title Header ---
-                Text("Settings")
-                    .font(.largeTitle.bold())
-                    .padding(.top, 10)
-                    .padding(.horizontal, horizontalPadding)
-                
-                // ---
+                    // --- Title Header ---
+                    Text("Settings")
+                        .font(.largeTitle.bold())
+                        .padding(.top, 10)
+                        .padding(.horizontal, horizontalPadding)
+                    
+                    // MARK: - AUDIO SECTION
+                    SettingsSectionHeader(title: "AUDIO")
+                        .padding(.horizontal, horizontalPadding)
 
-                // MARK: - AUDIO SECTION
-                SettingsSectionHeader(title: "AUDIO")
-                    .padding(.horizontal, horizontalPadding)
+                    VStack(spacing: 20) {
+                        // Volume Control View
+                        OptimizedVolumeControlView(settingsManager: settingsManager)
 
-                VStack(spacing: 20) {
-                    // Volume Control View
-                    OptimizedVolumeControlView(settingsManager: settingsManager)
-
-                    // Speech Rate Slider
-                    SliderSettingCard<SettingsManager>(
-                        value: $settingsManager.speechRate,
-                        range: 0.0...1.0,
-                        iconName: "speedometer",
-                        title: "Speech Rate",
-                        subtitle: "How fast voice speaks",
-                        tintColor: Color.purple
-                    )
-                }
-                .padding(.horizontal, horizontalPadding)
-
-                // ---
-
-                // MARK: - GENERAL SECTION
-                SettingsSectionHeader(title: "GENERAL")
+                        // Speech Rate Slider
+                        SliderSettingCard<SettingsManager>(
+                            value: $settingsManager.speechRate,
+                            range: 0.0...1.0,
+                            iconName: "speedometer",
+                            title: "Speech Rate",
+                            subtitle: "How fast voice speaks",
+                            tintColor: Color.purple
+                        )
+                    }
                     .padding(.horizontal, horizontalPadding)
 
-                VStack(spacing: 20) {
-                    ToggleSettingCard(
-                        isOn: $settingsManager.notificationsEnabled,
-                        iconName: "bell.fill",
-                        title: "Notifications",
-                        subtitle: "App alerts and updates",
-                        tintColor: Color.orange
-                    )
+                    // MARK: - GENERAL SECTION
+                    SettingsSectionHeader(title: "GENERAL")
+                        .padding(.horizontal, horizontalPadding)
+
+                    VStack(spacing: 20) {
+                        ToggleSettingCard(
+                            isOn: $settingsManager.notificationsEnabled,
+                            iconName: "bell.fill",
+                            title: "Notifications",
+                            subtitle: "App alerts and updates",
+                            tintColor: Color.orange
+                        )
+                    }
+                    .padding(.horizontal, horizontalPadding)
+
+                    // MARK: - FOOTER
+                    VStack {
+                        Text("VisionNav")
+                            .font(.headline)
+                            .foregroundColor(.blue)
+                        Text("Version \(settingsManager.appVersion). Made with accessibility in mind.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 20)
+                    .padding(.horizontal, horizontalPadding)
+
                 }
-                .padding(.horizontal, horizontalPadding)
-
-                // ---
-
-                // MARK: - FOOTER
-                VStack {
-                    Text("VisionNav")
-                        .font(.headline)
-                        .foregroundColor(.blue)
-                    Text("Version \(settingsManager.appVersion). Made with accessibility in mind.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 20)
-                .padding(.horizontal, horizontalPadding)
-
+                .padding(.bottom, 50)
             }
-            .padding(.bottom, 50)
-
-            // CRITICAL: Include the hidden volume view
-            SystemVolumeViewRepresentable(manager: settingsManager.systemVolumeManager)
-                .frame(width: 0, height: 0)
+            
+            // CRITICAL: Include the hidden volume view (positioned outside ScrollView for better performance)
+            VStack {
+                Spacer()
+                SystemVolumeViewRepresentable(manager: settingsManager.systemVolumeManager)
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+            }
         }
-        .background(groupedBackgroundColor.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
-
-        // Custom Toolbar for Back Button
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button {
-                    settingsManager.hapticFeedback() // HAPTIC: Trigger on navigation touch
+                    settingsManager.hapticFeedback()
                     dismiss()
                 } label: {
                     Image(systemName: "arrow.backward")
