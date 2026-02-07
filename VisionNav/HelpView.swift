@@ -2,31 +2,11 @@
 //  HelpView.swift
 //  VisionNav
 //
-//  Created by Nirdesh Pudasaini on 30/11/2025.
 
 import SwiftUI
 
-// MARK: - HAPTIC EXTENSION/MODIFIER (Placeholder - Replace with SettingsManager)
+// MARK: - Helper Components
 
-/// A simple extension to apply haptic feedback to a View's action.
-/// NOTE: In a real app, this should call SettingsManager().hapticFeedback()
-extension View {
-    func withHapticFeedback(action: @escaping () -> Void) -> some View {
-        Button {
-            // For a standalone file, we use the raw generator.
-            // In a real app, inject SettingsManager here:
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            action()
-        } label: {
-            self.contentShape(Rectangle())
-        }
-        .buttonStyle(.plain) // Use plain style to avoid visual side effects
-    }
-}
-
-// MARK: - 1. Helper Components
-
-/// A reusable component for the numbered step lists.
 struct NumberedStep: View {
     let number: Int
     let text: String
@@ -37,7 +17,6 @@ struct NumberedStep: View {
                 .font(.caption.bold())
                 .foregroundColor(.white)
                 .frame(width: 20, height: 20)
-                // Use a standard color for the circle background
                 .background(Color.secondary.opacity(0.8))
                 .clipShape(Circle())
             
@@ -50,28 +29,30 @@ struct NumberedStep: View {
     }
 }
 
-/// A reusable component for the main feature cards (Object Detection, Navigation).
 struct FeatureGuideCard<Content: View>: View {
     var title: String
     var subtitle: String
     var iconName: String
     var iconColor: Color
-    @ViewBuilder var stepsContent: Content
+    var stepsContent: Content
 
-    // Helper to get system background color robustly
-    private var cardBackgroundColor: Color {
-        Color(uiColor: .systemBackground)
-    }
-    
-    // Helper to get system gray for borders
-    private var subtleBorderColor: Color {
-        Color(uiColor: .systemGray5)
+    init(
+        title: String,
+        subtitle: String,
+        iconName: String,
+        iconColor: Color,
+        @ViewBuilder stepsContent: () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.iconName = iconName
+        self.iconColor = iconColor
+        self.stepsContent = stepsContent()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
-                // Icon Circle
                 Image(systemName: iconName)
                     .font(.system(size: 24, weight: .bold))
                     .foregroundColor(iconColor)
@@ -83,7 +64,6 @@ struct FeatureGuideCard<Content: View>: View {
                     Text(title)
                         .font(.title2)
                         .fontWeight(.bold)
-                        .foregroundColor(.primary)
                     
                     Text(subtitle)
                         .font(.subheadline)
@@ -91,52 +71,32 @@ struct FeatureGuideCard<Content: View>: View {
                 }
             }
             
-            // Steps Content (Passed in by the caller)
             stepsContent
         }
         .padding(20)
-        // Use the robust color reference
-        .background(cardBackgroundColor)
+        .background(Color(uiColor: .systemBackground))
         .cornerRadius(20)
-        // Add subtle, theme-aware border
         .overlay(
             RoundedRectangle(cornerRadius: 20)
-                .stroke(subtleBorderColor, lineWidth: 1)
+                .stroke(Color(uiColor: .systemGray5), lineWidth: 1)
         )
-        // Ensure shadow opacity works across modes
         .shadow(color: Color.primary.opacity(0.1), radius: 8, x: 0, y: 4)
     }
 }
 
-
-// MARK: - 2. Main Help Page View (Renamed to HelpView)
+// MARK: - Main Help View
 
 struct HelpView: View {
-    // Environment variable required to manually dismiss the view and go back
     @Environment(\.dismiss) var dismiss
-    
-    // Define a custom light orange color that is theme-agnostic (RGB)
-    private let lightTipBackground = Color(red: 1.0, green: 0.95, blue: 0.85) // Consistent very light orange/cream
-    
-    // Helper for grouped background color
-    private var groupedBackgroundColor: Color {
-        Color(uiColor: .systemGroupedBackground)
-    }
-    
-    // Helper for navigation back button color
-    private var backButtonColor: Color {
-        Color(uiColor: .systemGray5)
-    }
     
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                // --- Title Header (Moved to be inline with the scroll content) ---
                 Text("Help & Tutorials")
                     .font(.largeTitle.bold())
                     .padding(.top, 10)
                 
-                // --- 1. Audio Tutorial Card ---
+                // Audio Tutorial Card
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(spacing: 20) {
                         Image(systemName: "book.fill")
@@ -154,10 +114,8 @@ struct HelpView: View {
                         }
                     }
                     
-                    // BUTTON WITH HAPTIC
                     Button {
-                        // Action: Simulate playing the tutorial
-                        print("Playing full tutorial...")
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     } label: {
                         HStack {
                             Image(systemName: "play.fill")
@@ -165,23 +123,20 @@ struct HelpView: View {
                                 .fontWeight(.semibold)
                         }
                         .padding(.vertical, 10)
-                        .padding(.horizontal, 20)
                         .frame(maxWidth: .infinity)
-                        // Use a fixed light color for the button for contrast
                         .background(Color.white)
                         .foregroundColor(Color.purple)
                         .cornerRadius(12)
                     }
-                    .withHapticFeedback {} // Apply haptic feedback here
                 }
                 .padding(25)
                 .background(LinearGradient(colors: [.purple, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
                 .cornerRadius(20)
                 
-                // --- 2. Object Detection Card ---
+                // Object Detection Card
                 FeatureGuideCard(
                     title: "Object Detection",
-                    subtitle: "Point your camera at objects and VisionNav will identify them in real-time, announcing what it sees through audio feedback.",
+                    subtitle: "Identify objects in real-time with audio feedback.",
                     iconName: "camera.fill",
                     iconColor: .blue
                 ) {
@@ -193,10 +148,10 @@ struct HelpView: View {
                     }
                 }
                 
-                // --- 3. Navigation Mode Card ---
+                // Navigation Mode Card
                 FeatureGuideCard(
                     title: "Navigation Mode",
-                    subtitle: "Get turn-by-turn audio guidance to reach your destination safely with obstacle detection and path optimization.",
+                    subtitle: "Get turn-by-turn audio guidance safely.",
                     iconName: "location.fill",
                     iconColor: .green
                 ) {
@@ -208,39 +163,35 @@ struct HelpView: View {
                     }
                 }
                 
-                // --- 4. Quick Tips Section ---
+                // Quick Tips
                 VStack(alignment: .leading, spacing: 15) {
                     HStack {
                         Image(systemName: "lightbulb.fill")
                             .foregroundColor(.orange)
                         Text("Quick Tips")
                             .font(.title3.bold())
-                            .foregroundColor(.black)
                     }
                     
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("• Use headphones for clearer audio feedback in noisy environments")
-                        Text("• Haptic feedback is **always enabled** for tactile confirmation of actions") // Updated tip
-                        Text("• Adjust speech rate in Settings for comfortable listening")
-                        Text("• Ensure your volume is set appropriately for audio guidance")
+                        Text("• Use headphones for clearer audio")
+                        Text("• Haptic feedback is always enabled")
+                        Text("• Adjust speech rate in Settings")
                     }
                     .font(.subheadline)
-                    .foregroundColor(Color.black.opacity(0.8))
+                    .foregroundColor(.secondary)
                 }
                 .padding(20)
-                .background(lightTipBackground)
+                .background(Color.orange.opacity(0.1))
                 .cornerRadius(16)
                 
-                // --- 5. Contact Support ---
-                VStack(alignment: .center) {
+                // Contact Support
+                VStack {
                     Text("Need more help?")
                         .font(.headline)
                         .foregroundColor(.gray)
                     
-                    // BUTTON WITH HAPTIC
                     Button {
-                        // Action: Open support email or chat
-                        print("Contacting Support...")
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     } label: {
                         Text("Contact Support")
                             .fontWeight(.bold)
@@ -250,35 +201,26 @@ struct HelpView: View {
                             .foregroundColor(.white)
                             .cornerRadius(12)
                     }
-                    .withHapticFeedback {} // Apply haptic feedback here
                 }
                 .padding(.vertical, 10)
-
             }
             .padding(.horizontal, 25)
             .padding(.bottom, 30)
-
         }
-        // Use the robust grouped background color
-        .background(groupedBackgroundColor.ignoresSafeArea())
+        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
-        
-        // Custom Toolbar for Back Button
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                // BUTTON WITH HAPTIC
                 Button {
-                    // Manual trigger for the back button
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    dismiss() // Navigate back when pressed
+                    dismiss()
                 } label: {
-                    Image(systemName: "arrow.backward") // Back arrow icon
+                    Image(systemName: "arrow.backward")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(.primary)
                         .padding(8)
-                        // Use the robust system gray color for the button background
-                        .background(backButtonColor)
+                        .background(Color(uiColor: .systemGray5))
                         .clipShape(Circle())
                 }
             }
@@ -286,20 +228,8 @@ struct HelpView: View {
     }
 }
 
-// Preview structure for the new file
-struct HelpView_Previews: PreviewProvider {
-    static var previews: some View {
-        Group {
-            NavigationView { // Wrap in NavigationView for testing
-                HelpView()
-            }
-            .previewDisplayName("Light Mode")
-
-            NavigationView {
-                HelpView()
-            }
-            .preferredColorScheme(.dark) // Added Dark Mode Preview
-            .previewDisplayName("Dark Mode")
-        }
+#Preview {
+    NavigationStack {
+        HelpView()
     }
 }

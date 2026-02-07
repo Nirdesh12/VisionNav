@@ -4,10 +4,14 @@
 <dict>
     <key>NSCameraUsageDescription</key>
     <string>VisionNav needs camera access for object detection and navigation assistance.</string>
-    
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>VisionNav needs your location for navigation features.</string>
-    
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VisionNav needs microphone access for voice commands to set destinations.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>VisionNav uses speech recognition to understand your destination requests.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>VisionNav needs your location for continuous navigation.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

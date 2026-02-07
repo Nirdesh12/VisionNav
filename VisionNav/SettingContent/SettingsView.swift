@@ -1,8 +1,9 @@
 //
-// SettingView.swift - Fixed and Optimized
+//  SettingView.swift
+//  VisionNav
 //
+
 import SwiftUI
-import Foundation
 
 struct SettingView: View {
     @StateObject var settingsManager = SettingsManager()
@@ -10,23 +11,13 @@ struct SettingView: View {
 
     private let horizontalPadding: CGFloat = 25
 
-    private var groupedBackgroundColor: Color {
-        Color(uiColor: .systemGroupedBackground)
-    }
-
-    private var backButtonColor: Color {
-        Color(uiColor: .systemGray5)
-    }
-
     var body: some View {
         ZStack {
-            // Background
-            groupedBackgroundColor.ignoresSafeArea()
+            Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 30) {
 
-                    // --- Title Header ---
                     Text("Settings")
                         .font(.largeTitle.bold())
                         .padding(.top, 10)
@@ -37,10 +28,18 @@ struct SettingView: View {
                         .padding(.horizontal, horizontalPadding)
 
                     VStack(spacing: 20) {
-                        // Volume Control View
-                        OptimizedVolumeControlView(settingsManager: settingsManager)
+                        // Volume Control
+                        SliderSettingCard(
+                            value: $settingsManager.voiceVolume,
+                            range: 0.0...1.0,
+                            iconName: "speaker.wave.3.fill",
+                            title: "Voice Volume",
+                            subtitle: "Adjust audio feedback level",
+                            tintColor: Color.indigo,
+                            volumeController: settingsManager
+                        )
 
-                        // Speech Rate Slider
+                        // Speech Rate
                         SliderSettingCard<SettingsManager>(
                             value: $settingsManager.speechRate,
                             range: 0.0...1.0,
@@ -85,7 +84,7 @@ struct SettingView: View {
                 .padding(.bottom, 50)
             }
             
-            // CRITICAL: Include the hidden volume view (positioned outside ScrollView for better performance)
+            // Hidden volume view
             VStack {
                 Spacer()
                 SystemVolumeViewRepresentable(manager: settingsManager.systemVolumeManager)
@@ -105,7 +104,7 @@ struct SettingView: View {
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(.primary)
                         .padding(8)
-                        .background(backButtonColor)
+                        .background(Color(uiColor: .systemGray5))
                         .clipShape(Circle())
                 }
             }
@@ -113,32 +112,8 @@ struct SettingView: View {
     }
 }
 
-// MARK: - PERFORMANCE HELPER VIEW
-/// Extracts the frequently changing volume control into its own View struct.
-struct OptimizedVolumeControlView: View {
-    @ObservedObject var settingsManager: SettingsManager
-    
-    var body: some View {
-        SliderSettingCard(
-            value: $settingsManager.voiceVolume,
-            range: 0.0...1.0,
-            iconName: "speaker.wave.3.fill",
-            title: "Voice Volume",
-            subtitle: "Adjust audio feedback level",
-            tintColor: Color.indigo,
-            volumeController: settingsManager
-        )
-    }
-}
-
-
-// MARK: - PREVIEW
-
-struct SettingView_Previews: PreviewProvider {
-    static var previews: some View {
-        NavigationView {
-            SettingView()
-        }
-        .previewDisplayName("Default View")
+#Preview {
+    NavigationStack {
+        SettingView()
     }
 }
