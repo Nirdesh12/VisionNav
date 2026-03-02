@@ -144,7 +144,7 @@ class NavigationModel: NSObject, ObservableObject {
         processingQueue.async { [weak self] in
             // Prefer segmentation model, fall back to detection-only
             // NOTE: Add your custom trained seg model as "yolov26s-seg.mlpackage" to the Models/ folder
-            let names = ["yolov26s-seg", "yolov26s", "yolo11s-seg", "yolo11s", "yolov8s-seg", "yolov8s", "YOLOv3", "YOLOv3Tiny"]
+            let names = ["yolov26s-seg", "yolo26s-seg", "yolov26s", "yolo26s", "yolo11s-seg", "yolo11s", "yolov8s-seg", "yolov8s", "YOLOv3", "YOLOv3Tiny"]
             var url: URL?
             var name = "YOLO"
 
