@@ -68,6 +68,10 @@ struct RouteNavigationView: View {
             navigationModel.stairCountProvider = { [weak cameraManager] box, depth in
                 cameraManager?.countStairsInRegion(boundingBox: box, depthData: depth) ?? 0
             }
+            // Wire stair direction detection from camera manager to navigation model
+            navigationModel.stairDirectionProvider = { [weak cameraManager] box, depth in
+                cameraManager?.determineStairDirection(boundingBox: box, depthData: depth) ?? .unknown
+            }
         }
         .onDisappear { endNavigation() }
         .onReceive(detectionTimer) { _ in
@@ -623,12 +627,13 @@ struct RouteNavigationView: View {
                 .accessibilityLabel("Alert: \(alert.message)")
             }
 
-            // Stairs with step count
+            // Stairs with step count and direction (YOLO-confirmed only)
             if navigationModel.stairsDetected {
                 HStack {
                     Image(systemName: "stairs")
                     if navigationModel.stairCount > 0 {
-                        Text("\(navigationModel.stairCount) steps ahead")
+                        let dirStr = navigationModel.stairDirection != .unknown ? " \(navigationModel.stairDirection.rawValue)" : ""
+                        Text("\(navigationModel.stairCount) steps\(dirStr) ahead")
                             .font(.caption.weight(.semibold))
                     } else {
                         Text("Stairs detected ahead")
@@ -642,16 +647,17 @@ struct RouteNavigationView: View {
                 .accessibilityLabel(navigationModel.stairCount > 0 ? "\(navigationModel.stairCount) steps ahead" : "Stairs detected ahead")
             }
 
-            if cameraManager.stepDetected && cameraManager.stepType != .none && !navigationModel.stairsDetected {
+            // Path clear indicator
+            if cameraManager.pathClear && isNavigating && !navigationModel.stairsDetected {
                 HStack {
-                    Image(systemName: "stairs")
-                    Text(cameraManager.stepType.rawValue).font(.caption.weight(.semibold))
+                    Image(systemName: "checkmark.shield.fill")
+                    Text("Path clear").font(.caption.weight(.semibold))
                     Spacer()
                 }
-                .foregroundColor(.black)
+                .foregroundColor(.white)
                 .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow))
-                .accessibilityLabel(cameraManager.stepType.rawValue)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.8)))
+                .accessibilityLabel("Path is clear ahead")
             }
 
             if locationManager.hasArrived {
@@ -927,11 +933,25 @@ struct RouteNavigationView: View {
 
     private func processFrame() {
         guard cameraManager.isSessionRunning, let frame = cameraManager.currentFrame else { return }
+
+        // YOLO detection pipeline (labeled objects)
         navigationModel.processFrame(
             pixelBuffer: frame,
             depthData: cameraManager.currentDepthData,
-            stepInfo: (cameraManager.stepDetected, cameraManager.stepType, cameraManager.stepDistance),
             fovBox: cameraManager.fovBoxNormalized
+        )
+
+        // LiDAR-based FOV obstacle avoidance (runs independently of YOLO)
+        navigationModel.handleFOVObstacleAvoidance(
+            obstacleInFOV: cameraManager.obstacleInFOV,
+            obstacleDirection: cameraManager.obstacleDirection,
+            pathClear: cameraManager.pathClear,
+            nearestDistance: cameraManager.nearestObstacleDistance,
+            leftZoneDistance: cameraManager.leftZoneDistance,
+            centerZoneDistance: cameraManager.centerZoneDistance,
+            rightZoneDistance: cameraManager.rightZoneDistance,
+            routeBearing: locationManager.isRouteCalculated ? locationManager.currentRouteBearing : nil,
+            userHeading: locationManager.isRouteCalculated ? locationManager.userHeading : nil
         )
     }
 }

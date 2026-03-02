@@ -12,11 +12,10 @@ import UIKit
 import Combine
 import CoreHaptics
 
-public enum StepType: String {
-    case none = ""
-    case stepUp = "Steps going up ahead"
-    case stepDown = "Steps going down ahead"
-    case curb = "Curb ahead"
+public enum StairDirection: String {
+    case up = "going up"
+    case down = "going down"
+    case unknown = ""
 }
 
 public enum ProximityLevel: Int, Comparable {
@@ -75,11 +74,6 @@ class NavigationCameraManager: NSObject, ObservableObject {
     @Published var isSessionRunning: Bool = false
     @Published var hasLiDAR: Bool = false
 
-    // Step Detection
-    @Published var stepDetected: Bool = false
-    @Published var stepType: StepType = .none
-    @Published var stepDistance: Float = 0
-
     // Stair Counting via LiDAR
     @Published var stairStepCount: Int = 0
 
@@ -91,9 +85,16 @@ class NavigationCameraManager: NSObject, ObservableObject {
     // FOV Box (resizable)
     @Published var fovConfig: FOVBoxConfig = FOVBoxConfig()
 
+    // Obstacle spatial data (updated by LiDAR at 10Hz)
+    @Published var obstacleInFOV: Bool = false
+    @Published var obstacleDirection: String = "none"   // "left", "center", "right", "none"
+    @Published var pathClear: Bool = true
+    @Published var leftZoneDistance: Float = 999
+    @Published var centerZoneDistance: Float = 999
+    @Published var rightZoneDistance: Float = 999
+
     let arSession = ARSession()
     private var hapticTimer: Timer?
-    private var depthHistory: [[Float]] = []
 
     // CoreHaptics engine
     private var hapticEngine: CHHapticEngine?
@@ -261,10 +262,6 @@ class NavigationCameraManager: NSObject, ObservableObject {
         currentProximity = .none
     }
 
-    func triggerStepHaptic() {
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-    }
-
     // MARK: - LiDAR Stair Step Counting
     /// Count individual stair steps within a bounding box region using LiDAR depth data.
     /// Analyzes vertical depth profile for regular depth transitions (~15-20cm per step).
@@ -365,21 +362,26 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
     func stopSession() {
         arSession.pause()
-        depthHistory.removeAll()
         stopHaptics()
         DispatchQueue.main.async {
             self.isSessionRunning = false
             self.currentFrame = nil
             self.currentDepthData = nil
-            self.stepDetected = false
-            self.stepType = .none
             self.stairStepCount = 0
             self.nearestObstacleDistance = 999
             self.averageDepthInFOV = 999
+            self.obstacleInFOV = false
+            self.obstacleDirection = "none"
+            self.pathClear = true
+            self.leftZoneDistance = 999
+            self.centerZoneDistance = 999
+            self.rightZoneDistance = 999
         }
     }
 
-    // MARK: - Depth Analysis within FOV Box
+    // MARK: - Three-Zone Depth Analysis within FOV Box
+    /// Divides FOV into left/center/right thirds and computes nearest obstacle per zone.
+    /// Provides spatial obstacle data for directional avoidance guidance.
     private func analyzeDepthInFOVBox(_ depthData: ARDepthData) {
         let depthMap = depthData.depthMap
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
@@ -390,18 +392,21 @@ class NavigationCameraManager: NSObject, ObservableObject {
         let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
 
-        // Calculate FOV box bounds in depth map coordinates
         let fovBox = fovBoxNormalized
         let startX = Int(fovBox.minX * CGFloat(width))
         let endX = Int(fovBox.maxX * CGFloat(width))
         let startY = Int(fovBox.minY * CGFloat(height))
         let endY = Int(fovBox.maxY * CGFloat(height))
 
-        var minDist: Float = 999
-        var totalDepth: Float = 0
-        var validCount: Float = 0
+        // Define left/center/right zone boundaries
+        let fovWidth = endX - startX
+        let leftEndX = startX + fovWidth / 3
+        let rightStartX = startX + (2 * fovWidth) / 3
 
-        // Sample within FOV box only
+        var minDistLeft: Float = 999, minDistCenter: Float = 999, minDistRight: Float = 999
+        var totalDepth: Float = 0, validCount: Float = 0
+        var overallMin: Float = 999
+
         let stepSize = 3
         for y in stride(from: startY, to: endY, by: stepSize) {
             for x in stride(from: startX, to: endX, by: stepSize) {
@@ -409,95 +414,124 @@ class NavigationCameraManager: NSObject, ObservableObject {
                 let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
                 let depth = ptr[x]
 
-                if depth.isFinite && depth > 0.1 && depth < 5.0 {
-                    minDist = min(minDist, depth)
+                if depth.isFinite && depth > 0.1 && depth < 6.0 {
                     totalDepth += depth
                     validCount += 1
+                    overallMin = min(overallMin, depth)
+
+                    // Classify into left/center/right zones
+                    if x < leftEndX {
+                        minDistLeft = min(minDistLeft, depth)
+                    } else if x >= rightStartX {
+                        minDistRight = min(minDistRight, depth)
+                    } else {
+                        minDistCenter = min(minDistCenter, depth)
+                    }
                 }
             }
         }
 
         let avgDepth = validCount > 0 ? totalDepth / validCount : 999
 
-        DispatchQueue.main.async {
-            self.nearestObstacleDistance = minDist
-            self.averageDepthInFOV = avgDepth
-            self.updateHaptics(forDistance: minDist)
+        // Determine obstacle state
+        let warningThreshold: Float = 3.0
+        let hasObstacle = overallMin < warningThreshold
+        let isPathClear = overallMin >= warningThreshold
+
+        // Determine which zone has the nearest obstacle
+        let zoneMin = min(minDistLeft, min(minDistCenter, minDistRight))
+        let direction: String
+        if zoneMin >= warningThreshold {
+            direction = "none"
+        } else if zoneMin == minDistCenter {
+            direction = "center"
+        } else if zoneMin == minDistLeft {
+            direction = "left"
+        } else {
+            direction = "right"
         }
 
-        // Step detection in lower portion of FOV (6 strips for better resolution)
-        analyzeStepsInFOV(base: base, width: width, height: height, bytesPerRow: bytesPerRow, fovBox: fovBox)
+        DispatchQueue.main.async {
+            self.nearestObstacleDistance = overallMin
+            self.averageDepthInFOV = avgDepth
+            self.leftZoneDistance = minDistLeft
+            self.centerZoneDistance = minDistCenter
+            self.rightZoneDistance = minDistRight
+            self.obstacleInFOV = hasObstacle
+            self.obstacleDirection = direction
+            self.pathClear = isPathClear
+            self.updateHaptics(forDistance: overallMin)
+        }
     }
 
-    private func analyzeStepsInFOV(base: UnsafeMutableRawPointer, width: Int, height: Int, bytesPerRow: Int, fovBox: CGRect) {
-        // Sample 6 horizontal strips in FOV box for better step detection resolution
-        let strips: [CGFloat] = [0.90, 0.78, 0.66, 0.54, 0.42, 0.30]
-        var depths: [Float] = []
+    // MARK: - Stair Direction Detection (Phase 2)
+    /// Determines whether stairs are going up or down by comparing depth in top vs bottom
+    /// of the YOLO bounding box. Called only after YOLO confirms stairs.
+    func determineStairDirection(boundingBox: CGRect, depthData: ARDepthData?) -> StairDirection {
+        guard let depthData = depthData else { return .unknown }
 
-        let fovStartX = Int(fovBox.minX * CGFloat(width))
-        let fovEndX = Int(fovBox.maxX * CGFloat(width))
-        let fovCenterX = (fovStartX + fovEndX) / 2
-        let sampleWidth = (fovEndX - fovStartX) / 2
+        let depthMap = depthData.depthMap
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
 
-        for stripRatio in strips {
-            let y = Int(fovBox.minY * CGFloat(height) + fovBox.height * CGFloat(height) * stripRatio)
-            guard y >= 0, y < height else {
-                depths.append(0)
-                continue
-            }
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return .unknown }
 
-            var sum: Float = 0
-            var count: Float = 0
+        let centerX = Int(boundingBox.midX * CGFloat(width))
+        // Vision bounding box: origin bottom-left, y up
+        let topY = Int((1.0 - boundingBox.maxY) * CGFloat(height))
+        let bottomY = Int((1.0 - boundingBox.minY) * CGFloat(height))
+
+        guard topY < bottomY, centerX >= 0, centerX < width else { return .unknown }
+
+        let thirdHeight = (bottomY - topY) / 3
+        var topSum: Float = 0, topCount: Float = 0
+        var bottomSum: Float = 0, bottomCount: Float = 0
+
+        let sampleWidth = max(1, Int(boundingBox.width * CGFloat(width) * 0.2))
+        let xStart = max(0, centerX - sampleWidth / 2)
+        let xEnd = min(width, centerX + sampleWidth / 2)
+
+        for y in topY..<(topY + thirdHeight) {
+            guard y >= 0, y < height else { continue }
             let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
-
-            for x in stride(from: fovCenterX - sampleWidth/2, to: fovCenterX + sampleWidth/2, by: 2) {
-                guard x >= 0, x < width else { continue }
+            for x in stride(from: xStart, to: xEnd, by: 2) {
                 let d = ptr[x]
-                if d.isFinite && d > 0.1 && d < 5.0 {
-                    sum += d
-                    count += 1
+                if d.isFinite && d > 0.1 && d < 8.0 {
+                    topSum += d; topCount += 1
                 }
             }
-            depths.append(count > 0 ? sum / count : 0)
         }
 
-        depthHistory.append(depths)
-        if depthHistory.count > 5 { depthHistory.removeFirst() }
-        guard depthHistory.count >= 3 else { return }
-
-        // Average across history for stability
-        var avg = [Float](repeating: 0, count: strips.count)
-        for s in depthHistory {
-            for (i, d) in s.enumerated() where i < strips.count { avg[i] += d }
-        }
-        avg = avg.map { $0 / Float(depthHistory.count) }
-
-        // Check consecutive strip pairs for step transitions
-        var maxChange: Float = 0
-        var changeDirection: Float = 0
-        for i in 0..<(avg.count - 1) {
-            let change = avg[i + 1] - avg[i]
-            if abs(change) > abs(maxChange) {
-                maxChange = change
-                changeDirection = change
+        for y in (bottomY - thirdHeight)..<bottomY {
+            guard y >= 0, y < height else { continue }
+            let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
+            for x in stride(from: xStart, to: xEnd, by: 2) {
+                let d = ptr[x]
+                if d.isFinite && d > 0.1 && d < 8.0 {
+                    bottomSum += d; bottomCount += 1
+                }
             }
         }
 
-        DispatchQueue.main.async {
-            if abs(maxChange) > 0.07 {
-                self.stepDetected = true
-                self.stepType = changeDirection > 0 ? .stepDown : .stepUp
-                self.stepDistance = avg[0]
-                self.triggerStepHaptic()
-            } else if abs(maxChange) > 0.04 {
-                self.stepDetected = true
-                self.stepType = .curb
-                self.stepDistance = avg[0]
-            } else {
-                self.stepDetected = false
-                self.stepType = .none
-            }
+        guard topCount > 0, bottomCount > 0 else { return .unknown }
+
+        let topAvg = topSum / topCount
+        let bottomAvg = bottomSum / bottomCount
+
+        // Top deeper = stairs going up (ascending away from user)
+        // Bottom deeper = stairs going down (descending away from user)
+        let depthDifference = topAvg - bottomAvg
+        let threshold: Float = 0.15
+
+        if depthDifference > threshold {
+            return .up
+        } else if depthDifference < -threshold {
+            return .down
         }
+        return .unknown
     }
 }
 

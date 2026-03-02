@@ -163,7 +163,16 @@ class NavigationLocationManager: NSObject, ObservableObject {
 
     // Cached nearest route point index — avoids O(n) scan every location update
     private var cachedNearestRouteIndex: Int = 0
-    
+
+    /// Bearing of the current route segment for smart obstacle avoidance alignment.
+    /// More accurate than bearingToDestination for local directional guidance.
+    var currentRouteBearing: Double? {
+        guard hasRoadRoute, !routeCoordinates.isEmpty else { return nil }
+        let idx = cachedNearestRouteIndex
+        guard idx + 1 < routeCoordinates.count else { return bearingToDestination }
+        return calculateBearing(from: routeCoordinates[idx], to: routeCoordinates[idx + 1])
+    }
+
     // Location Manager
     private let locationManager = CLLocationManager()
     private var localSearch: MKLocalSearch?

@@ -47,16 +47,16 @@ public struct NavigationAlert: Identifiable {
     public let priority: Int
 
     public enum AlertType {
-        case info, warning, danger, step, tactile, stairs
+        case info, warning, danger, tactile, stairs, pathClear
 
         public var color: UIColor {
             switch self {
             case .info: return .systemBlue
             case .warning: return .systemOrange
             case .danger: return .systemRed
-            case .step: return .systemYellow
             case .tactile: return .systemYellow
             case .stairs: return .systemOrange
+            case .pathClear: return .systemGreen
             }
         }
 
@@ -65,9 +65,9 @@ public struct NavigationAlert: Identifiable {
             case .info: return "info.circle.fill"
             case .warning: return "exclamationmark.triangle.fill"
             case .danger: return "exclamationmark.octagon.fill"
-            case .step: return "stairs"
             case .tactile: return "road.lanes"
             case .stairs: return "stairs"
+            case .pathClear: return "checkmark.shield.fill"
             }
         }
     }
@@ -104,15 +104,22 @@ class NavigationModel: NSObject, ObservableObject {
     // Stairs
     @Published var stairsDetected: Bool = false
     @Published var stairCount: Int = 0
+    @Published var stairDirection: StairDirection = .unknown
 
     private var visionModel: VNCoreMLModel?
     private let confidenceThreshold: Float = 0.4
     private let processingQueue = DispatchQueue(label: "detection", qos: .userInitiated)
     private var isProcessing: Bool = false
     private var lastAlertTime: Date = .distantPast
-    private var lastStepAlertTime: Date = .distantPast
     private var lastTactileAlertTime: Date = .distantPast
     private var lastStairAlertTime: Date = .distantPast
+
+    // FOV-based obstacle avoidance state
+    private var lastFOVObstacleAlertTime: Date = .distantPast
+    private var lastPathClearTime: Date = .distantPast
+    private var lastFOVAlertMessage: String = ""
+    private let fovAlertCooldown: TimeInterval = 4.0
+    private let pathClearCooldown: TimeInterval = 6.0
 
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var currentDepthData: ARDepthData?
@@ -122,8 +129,9 @@ class NavigationModel: NSObject, ObservableObject {
     private var lastSegmentationRenderTime: Date = .distantPast
     private let segmentationRenderInterval: TimeInterval = 0.3  // Max ~3 mask renders per second
 
-    // Stair counting callback — set by the view to call NavigationCameraManager
+    // Stair counting & direction callbacks — set by the view to call NavigationCameraManager
     var stairCountProvider: ((CGRect, ARDepthData?) -> Int)?
+    var stairDirectionProvider: ((CGRect, ARDepthData?) -> StairDirection)?
     var onDistanceUpdate: ((Float) -> Void)?
 
     override init() {
@@ -183,12 +191,8 @@ class NavigationModel: NSObject, ObservableObject {
     }
 
     // MARK: - Process Frame
-    func processFrame(pixelBuffer: CVPixelBuffer, depthData: ARDepthData?, stepInfo: (detected: Bool, type: StepType, distance: Float), fovBox: CGRect) {
+    func processFrame(pixelBuffer: CVPixelBuffer, depthData: ARDepthData?, fovBox: CGRect) {
         currentFOVBox = fovBox
-
-        if stepInfo.detected && stepInfo.type != .none {
-            handleStepAlert(type: stepInfo.type, distance: stepInfo.distance)
-        }
 
         guard !isProcessing, let model = visionModel else { return }
         isProcessing = true
@@ -298,6 +302,7 @@ class NavigationModel: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.stairsDetected = false
                 self.stairCount = 0
+                self.stairDirection = .unknown
             }
         }
 
@@ -485,9 +490,11 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Stairs Analysis with LiDAR
+    // MARK: - Stairs Analysis with LiDAR (YOLO-confirmed only)
+    /// Called only when YOLO detects stairs. Uses LiDAR for step count and up/down direction.
     private func analyzeStairsWithLiDAR(boundingBox: CGRect) {
         let count = stairCountProvider?(boundingBox, currentDepthData) ?? 0
+        let direction = stairDirectionProvider?(boundingBox, currentDepthData) ?? .unknown
         let dist = getDepth(at: boundingBox)
         let now = Date()
         let shouldAlert = now.timeIntervalSince(lastStairAlertTime) > 5.0
@@ -495,14 +502,17 @@ class NavigationModel: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.stairsDetected = true
             self.stairCount = count
+            self.stairDirection = direction
 
             if shouldAlert {
                 self.lastStairAlertTime = now
                 var message: String
                 if count > 0 {
-                    message = "Stairs ahead, approximately \(count) steps"
+                    let dirStr = direction != .unknown ? " \(direction.rawValue)" : ""
+                    message = "\(count) steps\(dirStr) ahead"
                 } else {
-                    message = "Stairs detected ahead"
+                    let dirStr = direction != .unknown ? " \(direction.rawValue)" : ""
+                    message = "Stairs\(dirStr) detected ahead"
                 }
                 if let d = dist {
                     message += String(format: " at %.1f meters", d)
@@ -575,16 +585,120 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    private func handleStepAlert(type: StepType, distance: Float) {
+    // MARK: - FOV-Based Obstacle Avoidance (LiDAR Priority)
+    /// Processes continuous LiDAR zone data for directional obstacle warnings and "path clear" guidance.
+    /// Runs independently of YOLO — ensures LiDAR always triggers obstacle warnings.
+    func handleFOVObstacleAvoidance(
+        obstacleInFOV: Bool,
+        obstacleDirection: String,
+        pathClear: Bool,
+        nearestDistance: Float,
+        leftZoneDistance: Float,
+        centerZoneDistance: Float,
+        rightZoneDistance: Float,
+        routeBearing: Double?,
+        userHeading: Double?
+    ) {
         let now = Date()
-        guard now.timeIntervalSince(lastStepAlertTime) > 3.0 else { return }
-        lastStepAlertTime = now
 
-        let alert = NavigationAlert(message: type.rawValue, alertType: .step, priority: 2)
-        DispatchQueue.main.async {
-            self.currentAlert = alert
-            if self.speechEnabled { self.speak(type.rawValue, priority: 2) }
+        // Don't overlap with stair alerts
+        if stairsDetected { return }
+
+        if obstacleInFOV && nearestDistance < 3.0 {
+            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > fovAlertCooldown else { return }
+
+            let suggestedDir = suggestAvoidanceDirection(
+                obstacleDir: obstacleDirection,
+                leftDist: leftZoneDistance,
+                centerDist: centerZoneDistance,
+                rightDist: rightZoneDistance,
+                routeBearing: routeBearing,
+                userHeading: userHeading
+            )
+
+            let message: String
+            if nearestDistance < 2.0 {
+                message = "Obstacle very close, move \(suggestedDir)"
+            } else {
+                message = "Obstacle ahead, move \(suggestedDir)"
+            }
+
+            guard message != lastFOVAlertMessage || now.timeIntervalSince(lastFOVObstacleAlertTime) > fovAlertCooldown else { return }
+
+            lastFOVObstacleAlertTime = now
+            lastFOVAlertMessage = message
+
+            DispatchQueue.main.async {
+                let alert = NavigationAlert(message: message, alertType: .warning, priority: 3)
+                self.currentAlert = alert
+                if self.speechEnabled {
+                    self.speak(message, priority: 3)
+                }
+            }
+        } else if pathClear && nearestDistance >= 3.0 {
+            guard now.timeIntervalSince(lastPathClearTime) > pathClearCooldown else { return }
+            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 2.0 else { return }
+
+            lastPathClearTime = now
+            lastFOVAlertMessage = ""
+
+            DispatchQueue.main.async {
+                if self.speechEnabled {
+                    self.speak("Path clear, move forward", priority: 1)
+                }
+            }
         }
+    }
+
+    /// Determines which direction the user should move to avoid an obstacle,
+    /// considering both zone clearance and route bearing for smart alignment.
+    private func suggestAvoidanceDirection(
+        obstacleDir: String,
+        leftDist: Float,
+        centerDist: Float,
+        rightDist: Float,
+        routeBearing: Double?,
+        userHeading: Double?
+    ) -> String {
+        let moveDirection: String
+
+        switch obstacleDir {
+        case "left":
+            moveDirection = "right"
+        case "right":
+            moveDirection = "left"
+        case "center":
+            // Obstacle dead center — suggest the side with more space
+            if leftDist > rightDist {
+                moveDirection = "left"
+            } else {
+                moveDirection = "right"
+            }
+        default:
+            moveDirection = "forward"
+        }
+
+        // Smart navigation alignment: prefer the direction that keeps user on route
+        if let routeB = routeBearing, let userH = userHeading, obstacleDir == "center" {
+            let routeRelative = normalizeAngle(routeB - userH)
+            let leftViable = leftDist > 2.0
+            let rightViable = rightDist > 2.0
+
+            if routeRelative < -10 && leftViable {
+                return "left"
+            } else if routeRelative > 10 && rightViable {
+                return "right"
+            }
+        }
+
+        return moveDirection
+    }
+
+    private func normalizeAngle(_ angle: Double) -> Double {
+        var n = angle
+        while n > 180 { n -= 360 }
+        while n < -180 { n += 360 }
+        return n
     }
 
     // MARK: - Speech
