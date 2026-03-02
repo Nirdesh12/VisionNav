@@ -100,6 +100,12 @@ class NavigationCameraManager: NSObject, ObservableObject {
     private var continuousPlayer: CHHapticAdvancedPatternPlayer?
     private var engineRunning = false
 
+    // Frame throttling — skip frames to avoid overwhelming the main thread
+    private let depthQueue = DispatchQueue(label: "depthAnalysis", qos: .userInitiated)
+    private var lastDepthAnalysisTime: TimeInterval = 0
+    private let depthAnalysisInterval: TimeInterval = 0.1  // Max 10 depth analyses per second
+    private var isAnalyzingDepth = false
+
     override init() {
         super.init()
         hasLiDAR = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -501,8 +507,17 @@ extension NavigationCameraManager: ARSessionDelegate {
         let buffer = frame.capturedImage
         let depth = frame.smoothedSceneDepth ?? frame.sceneDepth
 
-        if let d = depth {
-            analyzeDepthInFOVBox(d)
+        // Throttle depth analysis — run at most every 100ms on a background queue
+        if let d = depth, !isAnalyzingDepth {
+            let now = frame.timestamp
+            if now - lastDepthAnalysisTime >= depthAnalysisInterval {
+                lastDepthAnalysisTime = now
+                isAnalyzingDepth = true
+                depthQueue.async { [weak self] in
+                    self?.analyzeDepthInFOVBox(d)
+                    self?.isAnalyzingDepth = false
+                }
+            }
         }
 
         DispatchQueue.main.async {

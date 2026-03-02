@@ -29,8 +29,11 @@ struct RouteNavigationView: View {
     @State private var fovScale: CGFloat = 1.0
     @State private var lastFOVScale: CGFloat = 1.0
 
-    let detectionTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
-    let voiceTimer = Timer.publish(every: 8.0, on: .main, in: .common).autoconnect()
+    // Timers — only connect when navigating to avoid wasting main thread cycles
+    @State private var detectionTimer: Timer.TimerPublisher = Timer.publish(every: 0.15, on: .main, in: .common)
+    @State private var voiceTimer: Timer.TimerPublisher = Timer.publish(every: 8.0, on: .main, in: .common)
+    @State private var detectionTimerCancellable: Cancellable?
+    @State private var voiceTimerCancellable: Cancellable?
 
     var body: some View {
         GeometryReader { geometry in
@@ -898,13 +901,24 @@ struct RouteNavigationView: View {
 
     // MARK: - Navigation Functions
     private func startNavigation() {
-        cameraManager.startSession()
-        navigationModel.startNavigation()
         isNavigating = true
+        // Start camera session after a short delay to let the view settle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            cameraManager.startSession()
+            navigationModel.startNavigation()
+        }
+        // Connect timers only when navigating
+        detectionTimerCancellable = detectionTimer.connect()
+        voiceTimerCancellable = voiceTimer.connect()
         locationManager.speak("Navigation started. \(locationManager.currentInstruction)", force: true)
     }
 
     private func endNavigation() {
+        // Disconnect timers first to stop firing
+        detectionTimerCancellable?.cancel()
+        detectionTimerCancellable = nil
+        voiceTimerCancellable?.cancel()
+        voiceTimerCancellable = nil
         cameraManager.stopSession()
         navigationModel.endNavigation()
         locationManager.clearRoute()
@@ -946,32 +960,50 @@ struct HighlightedRouteMapView: UIViewRepresentable {
     }
 
     func updateUIView(_ map: MKMapView, context: Context) {
-        map.removeOverlays(map.overlays)
-        map.removeAnnotations(map.annotations.filter { !($0 is MKUserLocation) })
+        let coord = context.coordinator
 
-        if let polyline = routePolyline {
-            map.addOverlay(polyline, level: .aboveRoads)
+        // Only update overlays when the polyline actually changes (avoid thrashing)
+        let currentPolylinePoints = routePolyline?.pointCount ?? 0
+        let polylineChanged = currentPolylinePoints != coord.lastPolylinePointCount
 
-            if !context.coordinator.hasSetRegion {
-                let rect = polyline.boundingMapRect
-                let padding = UIEdgeInsets(top: 50, left: 50, bottom: 50, right: 50)
-                map.setVisibleMapRect(rect, edgePadding: padding, animated: true)
-                context.coordinator.hasSetRegion = true
+        if polylineChanged {
+            coord.lastPolylinePointCount = currentPolylinePoints
+            map.removeOverlays(map.overlays)
+
+            if let polyline = routePolyline {
+                map.addOverlay(polyline, level: .aboveRoads)
+
+                if !coord.hasSetRegion {
+                    let rect = polyline.boundingMapRect
+                    let padding = UIEdgeInsets(top: 50, left: 50, bottom: 50, right: 50)
+                    map.setVisibleMapRect(rect, edgePadding: padding, animated: true)
+                    coord.hasSetRegion = true
+                }
             }
-        } else if let userLoc = userLocation, !context.coordinator.hasSetRegion {
+        }
+
+        if !coord.hasSetRegion, let userLoc = userLocation {
             let region = MKCoordinateRegion(center: userLoc, latitudinalMeters: 1000, longitudinalMeters: 1000)
             map.setRegion(region, animated: true)
-            context.coordinator.hasSetRegion = true
+            coord.hasSetRegion = true
         }
 
-        if let dest = destination {
-            let ann = MKPointAnnotation()
-            ann.coordinate = dest
-            ann.title = "Destination"
-            map.addAnnotation(ann)
+        // Only update destination annotation when it changes
+        let destChanged = (destination?.latitude != coord.lastDestLat) || (destination?.longitude != coord.lastDestLon)
+        if destChanged {
+            map.removeAnnotations(map.annotations.filter { !($0 is MKUserLocation) })
+            coord.lastDestLat = destination?.latitude
+            coord.lastDestLon = destination?.longitude
+
+            if let dest = destination {
+                let ann = MKPointAnnotation()
+                ann.coordinate = dest
+                ann.title = "Destination"
+                map.addAnnotation(ann)
+            }
         }
 
-        context.coordinator.hasRoadRoute = hasRoadRoute
+        coord.hasRoadRoute = hasRoadRoute
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -979,6 +1011,9 @@ struct HighlightedRouteMapView: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate {
         var hasSetRegion = false
         var hasRoadRoute = false
+        var lastPolylinePointCount: Int = 0
+        var lastDestLat: Double?
+        var lastDestLon: Double?
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let polyline = overlay as? MKPolyline {

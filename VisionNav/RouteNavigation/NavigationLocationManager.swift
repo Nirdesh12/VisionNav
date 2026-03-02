@@ -160,6 +160,9 @@ class NavigationLocationManager: NSObject, ObservableObject {
     private var announcedAt50m: Bool = false
     private var announcedAt25m: Bool = false
     private var announcedAt10m: Bool = false
+
+    // Cached nearest route point index — avoids O(n) scan every location update
+    private var cachedNearestRouteIndex: Int = 0
     
     // Location Manager
     private let locationManager = CLLocationManager()
@@ -531,6 +534,7 @@ class NavigationLocationManager: NSObject, ObservableObject {
                 var steps: [NavigationStep] = []
                 for leg in route.legs {
                     for step in leg.steps {
+                        guard step.maneuver.location.count >= 2 else { continue }
                         let maneuver = self.parseOSRMManeuver(step.maneuver)
                         let coord = CLLocationCoordinate2D(
                             latitude: step.maneuver.location[1],
@@ -589,44 +593,46 @@ class NavigationLocationManager: NSObject, ObservableObject {
         var index = encoded.startIndex
         var lat: Int32 = 0
         var lng: Int32 = 0
-        
+
         while index < encoded.endIndex {
             // Decode latitude
             var result: Int32 = 0
             var shift: Int32 = 0
             var byte: Int32
-            
+
             repeat {
-                byte = Int32(encoded[index].asciiValue! - 63)
+                guard index < encoded.endIndex, let ascii = encoded[index].asciiValue else { return coordinates }
+                byte = Int32(ascii) - 63
                 index = encoded.index(after: index)
                 result |= (byte & 0x1F) << shift
                 shift += 5
             } while byte >= 0x20
-            
+
             let dlat = (result & 1) != 0 ? ~(result >> 1) : (result >> 1)
             lat += dlat
-            
+
             // Decode longitude
             result = 0
             shift = 0
-            
+
             repeat {
-                byte = Int32(encoded[index].asciiValue! - 63)
+                guard index < encoded.endIndex, let ascii = encoded[index].asciiValue else { return coordinates }
+                byte = Int32(ascii) - 63
                 index = encoded.index(after: index)
                 result |= (byte & 0x1F) << shift
                 shift += 5
             } while byte >= 0x20
-            
+
             let dlng = (result & 1) != 0 ? ~(result >> 1) : (result >> 1)
             lng += dlng
-            
+
             let coordinate = CLLocationCoordinate2D(
                 latitude: Double(lat) / 1e5,
                 longitude: Double(lng) / 1e5
             )
             coordinates.append(coordinate)
         }
-        
+
         return coordinates
     }
     
@@ -835,16 +841,20 @@ class NavigationLocationManager: NSObject, ObservableObject {
     
     private func updateRoadRouteProgress(userLocation userCL: CLLocation) {
         guard currentStepIndex < routeSteps.count else { return }
-        
+
         let currentStep = routeSteps[currentStepIndex]
         let stepCL = CLLocation(latitude: currentStep.coordinate.latitude, longitude: currentStep.coordinate.longitude)
         let distToStep = userCL.distance(from: stepCL)
-        
-        // Find nearest point on route for accurate distance
+
+        // Find nearest point on route — search locally around cached index (O(1) amortized)
+        let searchRadius = 20 // Check 20 points ahead/behind cached position
+        let startSearch = max(0, cachedNearestRouteIndex - 5)
+        let endSearch = min(routeCoordinates.count, cachedNearestRouteIndex + searchRadius)
         var nearestDistance: Double = Double.greatestFiniteMagnitude
-        var nearestIndex = 0
-        
-        for (index, coord) in routeCoordinates.enumerated() {
+        var nearestIndex = cachedNearestRouteIndex
+
+        for index in startSearch..<endSearch {
+            let coord = routeCoordinates[index]
             let coordCL = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
             let dist = userCL.distance(from: coordCL)
             if dist < nearestDistance {
@@ -852,7 +862,8 @@ class NavigationLocationManager: NSObject, ObservableObject {
                 nearestIndex = index
             }
         }
-        
+        cachedNearestRouteIndex = nearestIndex
+
         // Calculate remaining distance from nearest point
         var remainingDist: Double = 0
         for i in nearestIndex..<(routeCoordinates.count - 1) {
@@ -1003,6 +1014,7 @@ class NavigationLocationManager: NSObject, ObservableObject {
         announcedAt25m = false
         announcedAt10m = false
         isOffRoute = false
+        cachedNearestRouteIndex = 0
         routeEngine.resetDeviationTracking()
     }
     

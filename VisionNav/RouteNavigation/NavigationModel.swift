@@ -118,6 +118,10 @@ class NavigationModel: NSObject, ObservableObject {
     private var currentDepthData: ARDepthData?
     private var currentFOVBox: CGRect = CGRect(x: 0.25, y: 0.2, width: 0.5, height: 0.6)
 
+    // Throttle segmentation mask rendering — no need to render every frame
+    private var lastSegmentationRenderTime: Date = .distantPast
+    private let segmentationRenderInterval: TimeInterval = 0.3  // Max ~3 mask renders per second
+
     // Stair counting callback — set by the view to call NavigationCameraManager
     var stairCountProvider: ((CGRect, ARDepthData?) -> Int)?
     var onDistanceUpdate: ((Float) -> Void)?
@@ -135,11 +139,12 @@ class NavigationModel: NSObject, ObservableObject {
         } catch {}
     }
 
-    // MARK: - Model Loading (yolo26s-seg preferred)
+    // MARK: - Model Loading (segmentation model preferred, detection-only as fallback)
     private func loadModel() {
         processingQueue.async { [weak self] in
             // Prefer segmentation model, fall back to detection-only
-            let names = ["yolo26s-seg", "yolo26s", "yolov26s-seg", "yolov26s", "yolo11s", "yolov8s", "YOLOv3", "YOLOv3Tiny"]
+            // NOTE: Add your custom trained seg model as "yolov26s-seg.mlpackage" to the Models/ folder
+            let names = ["yolov26s-seg", "yolov26s", "yolo11s-seg", "yolo11s", "yolov8s-seg", "yolov8s", "YOLOv3", "YOLOv3Tiny"]
             var url: URL?
             var name = "YOLO"
 
@@ -259,13 +264,18 @@ class NavigationModel: NSObject, ObservableObject {
             }
         }
 
-        // Also handle raw feature observations for segmentation masks
-        for result in results {
-            if let featureObs = result as? VNCoreMLFeatureValueObservation {
-                if let multiArray = featureObs.featureValue.multiArrayValue {
-                    let overlayImage = renderSegmentationMask(multiArray)
-                    DispatchQueue.main.async {
-                        self.segmentationOverlayImage = overlayImage
+        // Also handle raw feature observations for segmentation masks (throttled)
+        let now = Date()
+        if now.timeIntervalSince(lastSegmentationRenderTime) >= segmentationRenderInterval {
+            for result in results {
+                if let featureObs = result as? VNCoreMLFeatureValueObservation {
+                    if let multiArray = featureObs.featureValue.multiArrayValue {
+                        lastSegmentationRenderTime = now
+                        let overlayImage = renderSegmentationMask(multiArray)
+                        DispatchQueue.main.async {
+                            self.segmentationOverlayImage = overlayImage
+                        }
+                        break  // Only render one mask per cycle
                     }
                 }
             }
@@ -314,6 +324,8 @@ class NavigationModel: NSObject, ObservableObject {
         // Segmentation masks are typically [1, numClasses, H, W] or [H, W]
         let shape = multiArray.shape.map { $0.intValue }
         guard shape.count >= 2 else { return nil }
+        // Safety: skip rendering if the array is too small (likely not a segmentation mask)
+        guard multiArray.count > 100 else { return nil }
 
         let height: Int
         let width: Int
