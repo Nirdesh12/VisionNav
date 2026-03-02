@@ -130,7 +130,8 @@ class NavigationLocationManager: NSObject, ObservableObject {
     @Published var isRouteCalculated: Bool = false
     @Published var isCalculatingRoute: Bool = false
     @Published var hasRoadRoute: Bool = false
-    @Published var routeSource: String = ""  // "OSRM", "Apple", "Compass"
+    @Published var routeSource: String = ""  // "OSRM", "Custom", "Apple", "Compass"
+    @Published var isOffRoute: Bool = false
     
     // Current Navigation State
     @Published var currentStepIndex: Int = 0
@@ -153,6 +154,12 @@ class NavigationLocationManager: NSObject, ObservableObject {
     @Published var voiceEnabled: Bool = true
     private var lastVoiceTime: Date = .distantPast
     private var lastSpokenInstruction: String = ""
+    private var lastEnvironmentAnnounce: Date = .distantPast
+
+    // Turn announcement thresholds (announce earlier)
+    private var announcedAt50m: Bool = false
+    private var announcedAt25m: Bool = false
+    private var announcedAt10m: Bool = false
     
     // Location Manager
     private let locationManager = CLLocationManager()
@@ -163,6 +170,10 @@ class NavigationLocationManager: NSObject, ObservableObject {
     private let stepCompletionRadius: Double = 25
     private let walkingSpeed: Double = 1.4
     
+    // Custom Route Engine (A* pathfinding for Nepal)
+    private let routeEngine = CustomRouteEngine()
+    @Published var isGraphBuilt: Bool = false
+
     // OSRM API (free, no key needed)
     private let osrmBaseURL = "https://router.project-osrm.org/route/v1"
     
@@ -231,6 +242,25 @@ class NavigationLocationManager: NSObject, ObservableObject {
         speak(instruction)
     }
     
+    // MARK: - Environment-Aware Voice Guidance
+    /// Called by the view to inject environmental awareness (tactile paving, stairs) into voice
+    func announceEnvironment(tactilePaving: Bool, stairs: Bool, stairCount: Int) {
+        let now = Date()
+        guard now.timeIntervalSince(lastEnvironmentAnnounce) > 10.0 else { return }
+
+        if tactilePaving {
+            lastEnvironmentAnnounce = now
+            speak("Follow the tactile paving to stay on the path")
+        } else if stairs {
+            lastEnvironmentAnnounce = now
+            if stairCount > 0 {
+                speak("Stairs ahead with approximately \(stairCount) steps")
+            } else {
+                speak("Stairs detected ahead, proceed carefully")
+            }
+        }
+    }
+
     private func formatDistanceForVoice(_ distance: CLLocationDistance) -> String {
         if distance < 50 {
             return "\(Int(distance)) meters"
@@ -330,34 +360,132 @@ class NavigationLocationManager: NSObject, ObservableObject {
         calculateRoute()
     }
     
-    // MARK: - Calculate Route (OSRM → Apple → Compass)
+    // MARK: - Build Road Graph (call on app launch or when location available)
+    func buildRoadGraph() {
+        guard let center = userLocation else { return }
+        routeEngine.buildRoadNetwork(around: center, radius: 3000) { [weak self] success in
+            DispatchQueue.main.async {
+                self?.isGraphBuilt = success
+                if success {
+                    print("✅ Road graph built: ready for A* routing")
+                }
+            }
+        }
+    }
+
+    // MARK: - Calculate Route (OSRM → Custom A* → Apple → Compass)
     func calculateRoute() {
         guard let start = userLocation, let end = destination else { return }
-        
+
         isCalculatingRoute = true
         hasRoadRoute = false
         routeSource = ""
-        
+        routeEngine.resetDeviationTracking()
+
         // Try OSRM first (best for Nepal)
         requestOSRMRoute(from: start, to: end) { [weak self] success in
             if success {
                 self?.isCalculatingRoute = false
                 return
             }
-            
-            // Fallback to Apple Maps
-            self?.requestAppleRoute(from: start, to: end) { appleSuccess in
-                if appleSuccess {
+
+            // Fallback to Custom A* pathfinding
+            self?.requestCustomRoute(from: start, to: end) { customSuccess in
+                if customSuccess {
                     self?.isCalculatingRoute = false
                     return
                 }
-                
-                // Final fallback - compass navigation
-                DispatchQueue.main.async {
-                    self?.createCompassRoute(from: start, to: end)
-                    self?.isCalculatingRoute = false
+
+                // Fallback to Apple Maps
+                self?.requestAppleRoute(from: start, to: end) { appleSuccess in
+                    if appleSuccess {
+                        self?.isCalculatingRoute = false
+                        return
+                    }
+
+                    // Final fallback - compass navigation
+                    DispatchQueue.main.async {
+                        self?.createCompassRoute(from: start, to: end)
+                        self?.isCalculatingRoute = false
+                    }
                 }
             }
+        }
+    }
+
+    // MARK: - Custom A* Route
+    private func requestCustomRoute(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D, completion: @escaping (Bool) -> Void) {
+        // Build graph if not yet built
+        guard isGraphBuilt else {
+            routeEngine.buildRoadNetwork(around: start, radius: 3000) { [weak self] success in
+                guard let self = self, success else {
+                    completion(false)
+                    return
+                }
+                DispatchQueue.main.async { self.isGraphBuilt = true }
+                self.runCustomRoute(from: start, to: end, completion: completion)
+            }
+            return
+        }
+        runCustomRoute(from: start, to: end, completion: completion)
+    }
+
+    private func runCustomRoute(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D, completion: @escaping (Bool) -> Void) {
+        let result = routeEngine.findRoute(from: start, to: end)
+        guard result.success, result.coordinates.count >= 2 else {
+            completion(false)
+            return
+        }
+
+        // Convert CustomRouteStep → NavigationStep
+        let steps: [NavigationStep] = result.steps.map { step in
+            NavigationStep(
+                instruction: step.instruction,
+                distance: step.distance,
+                maneuver: parseCustomManeuver(step.maneuverType),
+                coordinate: step.coordinate
+            )
+        }
+
+        // Use smoothed coordinates for display
+        let displayCoords = result.smoothedCoordinates.isEmpty ? result.coordinates : result.smoothedCoordinates
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.routeCoordinates = displayCoords
+            self.routePolyline = MKPolyline(coordinates: displayCoords, count: displayCoords.count)
+            self.routeSteps = steps
+            self.distanceRemaining = result.totalDistance
+            self.timeRemaining = result.totalDistance / self.walkingSpeed
+            self.hasRoadRoute = true
+            self.routeSource = "Custom"
+
+            self.currentStepIndex = 0
+            if let firstStep = steps.first {
+                self.currentInstruction = firstStep.instruction
+                self.distanceToNextStep = firstStep.distance
+                self.currentManeuver = firstStep.maneuver
+            }
+
+            self.isRouteCalculated = true
+            self.speak("Route found using local pathfinding. \(self.formatDistanceForVoice(result.totalDistance)) total. \(self.currentInstruction)", force: true)
+            print("✅ Custom A* route: \(Int(result.totalDistance))m, \(steps.count) steps")
+            completion(true)
+        }
+    }
+
+    private func parseCustomManeuver(_ type: String) -> ManeuverType {
+        switch type {
+        case "straight": return .straight
+        case "slight_left": return .slightLeft
+        case "slight_right": return .slightRight
+        case "left": return .left
+        case "right": return .right
+        case "sharp_left": return .sharpLeft
+        case "sharp_right": return .sharpRight
+        case "uturn": return .uTurn
+        case "arrive": return .arrive
+        default: return .straight
         }
     }
     
@@ -660,13 +788,32 @@ class NavigationLocationManager: NSObject, ObservableObject {
     // MARK: - Update Navigation Progress
     func updateProgress() {
         guard let user = userLocation, let dest = destination, isRouteCalculated else { return }
-        
+
         let userCL = CLLocation(latitude: user.latitude, longitude: user.longitude)
         let destCL = CLLocation(latitude: dest.latitude, longitude: dest.longitude)
         let distToDest = userCL.distance(from: destCL)
-        
+
         distanceRemaining = distToDest
-        
+
+        // Check route deviation using CustomRouteEngine
+        if hasRoadRoute && !routeCoordinates.isEmpty {
+            let deviation = routeEngine.checkRouteDeviation(
+                userLocation: user,
+                userHeading: userHeading,
+                routeCoordinates: routeCoordinates
+            )
+            isOffRoute = deviation.isOffRoute
+
+            if deviation.shouldReroute {
+                speak("Recalculating route", force: true)
+                calculateRoute()
+                return
+            }
+            if deviation.isWrongDirection {
+                speak("Wrong direction. Turn around.", force: true)
+            }
+        }
+
         // Check arrival
         if distToDest < arrivalRadius {
             if !hasArrived {
@@ -715,13 +862,41 @@ class NavigationLocationManager: NSObject, ObservableObject {
         }
         distanceRemaining = remainingDist
         
+        // Announce upcoming turns at distance thresholds
+        if distToStep < 50 && !announcedAt50m && currentStepIndex < routeSteps.count {
+            announcedAt50m = true
+            let step = routeSteps[currentStepIndex]
+            if step.maneuver != .straight && step.maneuver != .depart {
+                speak("In \(formatDistanceForVoice(distToStep)), \(step.maneuver.voiceInstruction.lowercased())")
+            }
+        }
+        if distToStep < 25 && !announcedAt25m && currentStepIndex < routeSteps.count {
+            announcedAt25m = true
+            let step = routeSteps[currentStepIndex]
+            if step.maneuver != .straight && step.maneuver != .depart {
+                speak(step.maneuver.voiceInstruction, force: true)
+            }
+        }
+        if distToStep < 10 && !announcedAt10m && currentStepIndex < routeSteps.count {
+            announcedAt10m = true
+            let step = routeSteps[currentStepIndex]
+            if step.maneuver != .straight {
+                speak("\(step.maneuver.voiceInstruction) now", force: true)
+            }
+        }
+
         // Check if reached current step
         if distToStep < stepCompletionRadius && currentStepIndex < routeSteps.count - 1 {
             currentStepIndex += 1
+            // Reset announcement flags for next step
+            announcedAt50m = false
+            announcedAt25m = false
+            announcedAt10m = false
+
             let nextStep = routeSteps[currentStepIndex]
             currentInstruction = nextStep.instruction
             currentManeuver = nextStep.maneuver
-            
+
             // Calculate distance to next step
             if currentStepIndex + 1 < routeSteps.count {
                 let nextNextStep = routeSteps[currentStepIndex + 1]
@@ -730,7 +905,7 @@ class NavigationLocationManager: NSObject, ObservableObject {
             } else {
                 distanceToNextStep = distanceRemaining
             }
-            
+
             speak(nextStep.maneuver.voiceInstruction, force: true)
         } else {
             distanceToNextStep = distToStep
@@ -824,6 +999,11 @@ class NavigationLocationManager: NSObject, ObservableObject {
         timeRemaining = 0
         hasArrived = false
         bearingToDestination = 0
+        announcedAt50m = false
+        announcedAt25m = false
+        announcedAt10m = false
+        isOffRoute = false
+        routeEngine.resetDeviationTracking()
     }
     
     // MARK: - Formatting
@@ -845,6 +1025,7 @@ class NavigationLocationManager: NSObject, ObservableObject {
     var routeSourceDisplay: String {
         switch routeSource {
         case "OSRM": return "OpenStreetMap"
+        case "Custom": return "Local A*"
         case "Apple": return "Apple Maps"
         case "Compass": return "Compass"
         default: return "Unknown"
