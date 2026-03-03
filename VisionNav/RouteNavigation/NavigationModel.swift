@@ -94,7 +94,7 @@ class NavigationModel: NSObject, ObservableObject {
     @Published var isModelLoaded: Bool = false
     @Published var modelName: String = "YOLO"
     @Published var currentAlert: NavigationAlert?
-    @Published var speechEnabled: Bool = true
+    @Published var speechEnabled: Bool = true  // Voice feedback ON by default — critical for blind users
     @Published var nearestDistance: Float = 999
 
     // Segmentation
@@ -142,6 +142,12 @@ class NavigationModel: NSObject, ObservableObject {
 
     // Device pitch — used to suppress ground-plane false obstacle alerts
     var devicePitch: Float = 0  // radians, set from ARFrame.camera.eulerAngles.x
+
+    // Zone distances — updated each frame from processFrame for directional alerts
+    private var currentLeftZoneDist: Float = 999
+    private var currentCenterZoneDist: Float = 999
+    private var currentRightZoneDist: Float = 999
+    private var currentObstacleDirection: String = "none"
 
     // Tactile temporal filtering
     private let tactileConfidenceThreshold: Float = 0.55
@@ -786,12 +792,10 @@ class NavigationModel: NSObject, ObservableObject {
                     priority: 2
                 )
                 self.currentAlert = alert
-                if self.speechEnabled {
-                    if direction == .center {
-                        self.speak("Follow the tactile paving ahead", priority: 2)
-                    } else {
-                        self.speak(direction.rawValue, priority: 2)
-                    }
+                if direction == .center {
+                    self.speak("Follow the tactile paving ahead", priority: 2)
+                } else {
+                    self.speak(direction.rawValue, priority: 2)
                 }
             }
         }
@@ -848,9 +852,7 @@ class NavigationModel: NSObject, ObservableObject {
                 let priority = (dist ?? 999) < 1.0 ? 4 : 3
                 let alert = NavigationAlert(message: message, alertType: .stairs, priority: priority)
                 self.currentAlert = alert
-                if self.speechEnabled {
-                    self.speak(message, priority: priority)
-                }
+                self.speak(message, priority: priority)
             }
         }
     }
@@ -885,9 +887,9 @@ class NavigationModel: NSObject, ObservableObject {
         return d.isFinite && d > 0.1 && d < 5.0 ? d : nil
     }
 
-    // MARK: - Alert System (YOLO-labeled object alerts)
-    /// Fires for YOLO-detected obstacles with specific labels. Provides richer info than
-    /// the generic LiDAR FOV handler (which only says "obstacle").
+    // MARK: - Alert System (YOLO-labeled object alerts with directional guidance)
+    /// Fires for YOLO-detected obstacles with specific label names and uses zone data
+    /// to tell the user which direction to move (e.g., "person on your left, move right").
     private func checkAlert(_ detections: [NavigationDetection]) {
         let now = Date()
         guard now.timeIntervalSince(lastAlertTime) > 3.0 else { return }
@@ -895,13 +897,38 @@ class NavigationModel: NSObject, ObservableObject {
         let obs = detections.filter { $0.isObstacle && $0.distance != nil }
         guard let nearest = obs.first, let dist = nearest.distance else { return }
 
+        // Determine which side the obstacle is on from its bounding box center
+        // Vision coordinate: 0=left edge, 1=right edge (midX)
+        let objSide: String
+        let midX = nearest.boundingBox.midX
+        if midX < 0.35 {
+            objSide = "left"
+        } else if midX > 0.65 {
+            objSide = "right"
+        } else {
+            objSide = "center"
+        }
+
+        // Suggest avoidance direction based on zone clearance
+        let moveDir: String
+        if objSide == "left" {
+            moveDir = "move right"
+        } else if objSide == "right" {
+            moveDir = "move left"
+        } else {
+            // Center — pick the side with more space
+            moveDir = currentLeftZoneDist > currentRightZoneDist ? "move left" : "move right"
+        }
+
         var alert: NavigationAlert?
         if dist < 0.5 {
-            alert = NavigationAlert(message: "\(nearest.label) very close!", alertType: .danger, priority: 4)
+            alert = NavigationAlert(message: "\(nearest.label) very close! \(moveDir) now", alertType: .danger, priority: 4)
         } else if dist < 1.0 {
-            alert = NavigationAlert(message: "\(nearest.label) close, \(String(format: "%.1f", dist)) meters", alertType: .danger, priority: 3)
+            let sideStr = objSide == "center" ? "ahead" : "on your \(objSide)"
+            alert = NavigationAlert(message: "\(nearest.label) \(sideStr), \(moveDir)", alertType: .danger, priority: 3)
         } else if dist < 2.0 {
-            alert = NavigationAlert(message: "\(nearest.label) \(String(format: "%.1f", dist)) meters ahead", alertType: .warning, priority: 2)
+            let sideStr = objSide == "center" ? "ahead" : "on your \(objSide)"
+            alert = NavigationAlert(message: "\(nearest.label) \(sideStr), \(String(format: "%.1f", dist)) meters", alertType: .warning, priority: 2)
         } else if dist < 3.0 {
             alert = NavigationAlert(message: "\(nearest.label) ahead", alertType: .info, priority: 1)
         }
@@ -910,7 +937,7 @@ class NavigationModel: NSObject, ObservableObject {
             lastAlertTime = now
             DispatchQueue.main.async {
                 self.currentAlert = a
-                if self.speechEnabled { self.speak(a.message, priority: a.priority) }
+                self.speak(a.message, priority: a.priority)
             }
         }
     }
@@ -932,12 +959,17 @@ class NavigationModel: NSObject, ObservableObject {
     ) {
         let now = Date()
 
+        // Store zone distances for directional alerts in checkAlert
+        currentLeftZoneDist = leftZoneDistance
+        currentCenterZoneDist = centerZoneDistance
+        currentRightZoneDist = rightZoneDistance
+        currentObstacleDirection = obstacleDirection
+
         // Don't overlap with stair alerts
         if stairsDetected { return }
 
-        // Suppress obstacle alerts when phone is pointing at the ground (~60°+ downward)
-        // The ground surface itself reads as a close "obstacle" — this is a false positive.
-        // Allow ONLY emergency STOP (< 0.3m) through, since even ground-facing can have real obstacles.
+        // Suppress obstacle alerts when phone is pointing at the ground (~55°+ downward)
+        // The ground surface reads as a close "obstacle" — filter it out.
         if phonePointingAtGround && nearestDistance > 0.3 { return }
 
         // === EMERGENCY STOP: < 0.3m ===
@@ -949,9 +981,7 @@ class NavigationModel: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 let alert = NavigationAlert(message: "Stop!", alertType: .danger, priority: 5)
                 self.currentAlert = alert
-                if self.speechEnabled {
-                    self.speak("Stop!", priority: 5)
-                }
+                self.speak("Stop!", priority: 5)
             }
             return
         }
@@ -967,7 +997,7 @@ class NavigationModel: NSObject, ObservableObject {
                 userHeading: userHeading
             )
 
-            // Determine distance band for progressive callouts
+            // Determine distance band for progressive callouts — ALWAYS include direction
             let currentBand: Int
             let message: String
             let priority: Int
@@ -985,27 +1015,27 @@ class NavigationModel: NSObject, ObservableObject {
                 cooldown = dangerCooldown
             } else if nearestDistance < 2.0 {
                 currentBand = 2
-                let sideDesc: String
                 switch obstacleDirection {
-                case "left": sideDesc = "Something on your left"
-                case "right": sideDesc = "Something on your right"
-                default: sideDesc = "Obstacle ahead"
+                case "left": message = "Something on your left, move \(suggestedDir)"
+                case "right": message = "Something on your right, move \(suggestedDir)"
+                default: message = "Obstacle ahead, move \(suggestedDir)"
                 }
-                message = sideDesc
                 priority = 2
                 cooldown = warningCooldown
             } else {
                 currentBand = 1
-                message = "Obstacle ahead"
+                switch obstacleDirection {
+                case "left": message = "Something approaching from your left"
+                case "right": message = "Something approaching from your right"
+                default: message = "Obstacle ahead, move \(suggestedDir)"
+                }
                 priority = 1
                 cooldown = fovAlertCooldown
             }
 
-            // Band stability: require multiple consecutive frames in the same band
-            // before triggering a new announcement (prevents oscillation chatter)
+            // Band stability: require multiple consecutive frames in same band before announcing
             if currentBand != lastAnnouncedDistanceBand {
                 consecutiveBandFrames += 1
-                // Only announce if band held stable for N frames, OR it's a critical band
                 if consecutiveBandFrames < bandStabilityRequired && currentBand < 3 {
                     return
                 }
@@ -1025,9 +1055,7 @@ class NavigationModel: NSObject, ObservableObject {
                 let alertType: NavigationAlert.AlertType = nearestDistance < 1.0 ? .danger : .warning
                 let alert = NavigationAlert(message: message, alertType: alertType, priority: priority)
                 self.currentAlert = alert
-                if self.speechEnabled {
-                    self.speak(message, priority: priority)
-                }
+                self.speak(message, priority: priority)
             }
         } else if pathClear && nearestDistance >= 3.0 {
             guard now.timeIntervalSince(lastPathClearTime) > pathClearCooldown else { return }
@@ -1039,9 +1067,7 @@ class NavigationModel: NSObject, ObservableObject {
             consecutiveBandFrames = 0
 
             DispatchQueue.main.async {
-                if self.speechEnabled {
-                    self.speak("Path clear", priority: 1)
-                }
+                self.speak("Path clear", priority: 1)
             }
         }
     }
@@ -1081,7 +1107,7 @@ class NavigationModel: NSObject, ObservableObject {
             self.stairDirection = lidarDirection
             let alert = NavigationAlert(message: message, alertType: .stairs, priority: priority)
             self.currentAlert = alert
-            if self.speechEnabled { self.speak(message, priority: priority) }
+            self.speak(message, priority: priority)
         }
     }
 
@@ -1101,7 +1127,7 @@ class NavigationModel: NSObject, ObservableObject {
         DispatchQueue.main.async {
             let alert = NavigationAlert(message: message, alertType: .danger, priority: priority)
             self.currentAlert = alert
-            if self.speechEnabled { self.speak(message, priority: priority) }
+            self.speak(message, priority: priority)
         }
     }
 
