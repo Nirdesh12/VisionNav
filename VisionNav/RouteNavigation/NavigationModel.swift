@@ -122,17 +122,30 @@ class NavigationModel: NSObject, ObservableObject {
     private var lastPathClearTime: Date = .distantPast
     private var lastFOVAlertMessage: String = ""
     private var lastAnnouncedDistanceBand: Int = 0  // 0=none, 1=3m, 2=2m, 3=1m, 4=stop
+    private var consecutiveBandFrames: Int = 0       // frames in current band before announcing
+    private let bandStabilityRequired: Int = 3       // require 3 frames before band change triggers speech
 
-    // Safety-tuned cooldowns — shorter for danger, longer for info
-    private let emergencyCooldown: TimeInterval = 1.0
-    private let dangerCooldown: TimeInterval = 1.5
-    private let warningCooldown: TimeInterval = 3.0
-    private let fovAlertCooldown: TimeInterval = 3.0
-    private let pathClearCooldown: TimeInterval = 8.0
-    private let stairCooldown: TimeInterval = 3.0
-    private let dropOffCooldown: TimeInterval = 2.0
+    // ── Global speech gate ──────────────────────────────────
+    // Prevents ALL non-emergency speech within this window after any utterance
+    private var lastSpokeTime: Date = .distantPast
+    private let globalSpeechGap: TimeInterval = 2.5
+
+    // ── Per-category cooldowns (tuned to reduce chatter) ───
+    private let emergencyCooldown: TimeInterval = 2.0
+    private let dangerCooldown: TimeInterval = 3.0
+    private let warningCooldown: TimeInterval = 5.0
+    private let fovAlertCooldown: TimeInterval = 5.0
+    private let pathClearCooldown: TimeInterval = 20.0
+    private let stairCooldown: TimeInterval = 5.0
+    private let dropOffCooldown: TimeInterval = 4.0
     private var lastEmergencyAlertTime: Date = .distantPast
     private var lastDropOffAlertTime: Date = .distantPast
+
+    // Tactile temporal filtering
+    private let tactileConfidenceThreshold: Float = 0.55
+    private var consecutiveTactileFrames: Int = 0
+    private let tactileFramesRequired: Int = 3
+    private let minTactileBBoxArea: CGFloat = 0.005  // 0.5% of frame
 
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var currentDepthData: ARDepthData?
@@ -140,7 +153,7 @@ class NavigationModel: NSObject, ObservableObject {
 
     // Throttle segmentation mask rendering — no need to render every frame
     private var lastSegmentationRenderTime: Date = .distantPast
-    private let segmentationRenderInterval: TimeInterval = 0.3
+    private let segmentationRenderInterval: TimeInterval = 0.5
 
     // Stair counting & direction callbacks — set by the view to call NavigationCameraManager
     var stairCountProvider: ((CGRect, ARDepthData?) -> Int)?
@@ -247,10 +260,12 @@ class NavigationModel: NSObject, ObservableObject {
         request.imageCropAndScaleOption = .scaleFill
 
         processingQueue.async { [weak self] in
-            do {
-                let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
-                try handler.perform([request])
-            } catch {}
+            autoreleasepool {
+                do {
+                    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+                    try handler.perform([request])
+                } catch {}
+            }
             self?.isProcessing = false
         }
     }
@@ -292,8 +307,12 @@ class NavigationModel: NSObject, ObservableObject {
                 allResults.append(detection)
 
                 if name.contains("tactile") || name.contains("paving") {
-                    foundTactilePaving = true
-                    tactileBox = obs.boundingBox
+                    // Higher confidence threshold for tactile to reduce false positives
+                    let bboxArea = obs.boundingBox.width * obs.boundingBox.height
+                    if label.confidence >= tactileConfidenceThreshold && bboxArea >= minTactileBBoxArea {
+                        foundTactilePaving = true
+                        tactileBox = obs.boundingBox
+                    }
                 }
                 if name.contains("stair") || name.contains("steps") {
                     foundStairs = true
@@ -315,8 +334,12 @@ class NavigationModel: NSObject, ObservableObject {
                 allResults.append(detection)
 
                 if name.contains("tactile") || name.contains("paving") || name.contains("blind path") {
-                    foundTactilePaving = true
-                    tactileBox = detection.boundingBox
+                    // Higher confidence + min bbox for tactile (reduce false positives)
+                    let bboxArea = detection.boundingBox.width * detection.boundingBox.height
+                    if detection.confidence >= tactileConfidenceThreshold && bboxArea >= minTactileBBoxArea {
+                        foundTactilePaving = true
+                        tactileBox = detection.boundingBox
+                    }
                 }
                 if name.contains("stair") || name.contains("steps") {
                     foundStairs = true
@@ -368,10 +391,14 @@ class NavigationModel: NSObject, ObservableObject {
             }
         }
 
-        // Analyze tactile paving position
+        // Analyze tactile paving position (with temporal filtering — require N consecutive frames)
         if foundTactilePaving, let box = tactileBox {
-            analyzeTactilePavingPosition(box)
+            consecutiveTactileFrames += 1
+            if consecutiveTactileFrames >= tactileFramesRequired {
+                analyzeTactilePavingPosition(box)
+            }
         } else {
+            consecutiveTactileFrames = 0  // reset on miss
             DispatchQueue.main.async {
                 self.tactilePavingDetected = false
                 self.tactilePavingDirection = .none
@@ -399,11 +426,19 @@ class NavigationModel: NSObject, ObservableObject {
 
     private func finishProcessing(allResults: [NavigationDetection], fovResults: [NavigationDetection], minDist: Float) {
         DispatchQueue.main.async {
-            self.detections = allResults
-            self.detectionsInFOV = fovResults
-            self.detectionCount = allResults.count
-            self.nearestDistance = minDist
-            self.onDistanceUpdate?(minDist)
+            // Only update @Published when values changed (reduces SwiftUI redraws)
+            if self.detectionCount != allResults.count {
+                self.detections = allResults
+                self.detectionsInFOV = fovResults
+                self.detectionCount = allResults.count
+            } else if !allResults.isEmpty {
+                self.detections = allResults
+                self.detectionsInFOV = fovResults
+            }
+            if abs(self.nearestDistance - minDist) > 0.05 {
+                self.nearestDistance = minDist
+                self.onDistanceUpdate?(minDist)
+            }
         }
     }
 
@@ -735,7 +770,7 @@ class NavigationModel: NSObject, ObservableObject {
         }
 
         let now = Date()
-        let shouldAlert = now.timeIntervalSince(lastTactileAlertTime) > 4.0
+        let shouldAlert = now.timeIntervalSince(lastTactileAlertTime) > 8.0
 
         DispatchQueue.main.async {
             self.tactilePavingDetected = true
@@ -848,23 +883,25 @@ class NavigationModel: NSObject, ObservableObject {
         return d.isFinite && d > 0.1 && d < 5.0 ? d : nil
     }
 
-    // MARK: - Alert System
+    // MARK: - Alert System (YOLO-labeled object alerts)
+    /// Only fires for YOLO-detected objects that have a label name — suppressed when the
+    /// LiDAR FOV handler already covers the same distance range to avoid double-speaking.
     private func checkAlert(_ detections: [NavigationDetection]) {
         let now = Date()
-        guard now.timeIntervalSince(lastAlertTime) > 2.0 else { return }
+        guard now.timeIntervalSince(lastAlertTime) > 4.0 else { return }
+
+        // Suppress when LiDAR FOV handler recently spoke (they cover the same obstacle)
+        guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 3.0 else { return }
 
         let obs = detections.filter { $0.isObstacle && $0.distance != nil }
         guard let nearest = obs.first, let dist = nearest.distance else { return }
 
+        // Only announce labeled objects at close range — farther objects use LiDAR FOV handler
         var alert: NavigationAlert?
         if dist < 0.5 {
             alert = NavigationAlert(message: "\(nearest.label) extremely close!", alertType: .danger, priority: 4)
-        } else if dist < 1.0 {
-            alert = NavigationAlert(message: "\(nearest.label) very close!", alertType: .danger, priority: 3)
-        } else if dist < 2.0 {
-            alert = NavigationAlert(message: "\(nearest.label) \(String(format: "%.1f", dist))m", alertType: .warning, priority: 2)
-        } else if dist < 3.0 {
-            alert = NavigationAlert(message: "\(nearest.label) nearby", alertType: .info, priority: 1)
+        } else if dist < 1.5 {
+            alert = NavigationAlert(message: "\(nearest.label) \(String(format: "%.1f", dist)) meters", alertType: .warning, priority: 2)
         }
 
         if let a = alert {
@@ -935,30 +972,38 @@ class NavigationModel: NSObject, ObservableObject {
                 cooldown = dangerCooldown
             } else if nearestDistance < 1.0 {
                 currentBand = 3
-                message = "Obstacle very close, move \(suggestedDir)"
+                message = "Obstacle close, move \(suggestedDir)"
                 priority = 3
                 cooldown = dangerCooldown
             } else if nearestDistance < 2.0 {
                 currentBand = 2
-                // Describe which side obstacle is on
                 let sideDesc: String
                 switch obstacleDirection {
-                case "left": sideDesc = "Something on your left, move \(suggestedDir)"
-                case "right": sideDesc = "Something on your right, move \(suggestedDir)"
-                default: sideDesc = "Obstacle ahead, move \(suggestedDir)"
+                case "left": sideDesc = "Something on your left"
+                case "right": sideDesc = "Something on your right"
+                default: sideDesc = "Obstacle ahead"
                 }
                 message = sideDesc
-                priority = 3
+                priority = 2
                 cooldown = warningCooldown
             } else {
                 currentBand = 1
-                message = "Obstacle ahead, \(String(format: "%.0f", nearestDistance)) meters"
-                priority = 2
+                message = "Obstacle ahead"
+                priority = 1
                 cooldown = fovAlertCooldown
             }
 
-            // Only announce if entering a new (closer) distance band or cooldown expired
-            let bandChanged = currentBand > lastAnnouncedDistanceBand
+            // Band stability: require multiple consecutive frames in the same band
+            // before triggering a new announcement (prevents oscillation chatter)
+            if currentBand != lastAnnouncedDistanceBand {
+                consecutiveBandFrames += 1
+                // Only announce if band held stable for N frames, OR it's a critical band
+                if consecutiveBandFrames < bandStabilityRequired && currentBand < 3 {
+                    return
+                }
+            }
+
+            let bandChanged = currentBand > lastAnnouncedDistanceBand && consecutiveBandFrames >= bandStabilityRequired
             let cooldownExpired = now.timeIntervalSince(lastFOVObstacleAlertTime) > cooldown
 
             guard bandChanged || cooldownExpired else { return }
@@ -966,6 +1011,7 @@ class NavigationModel: NSObject, ObservableObject {
             lastFOVObstacleAlertTime = now
             lastFOVAlertMessage = message
             lastAnnouncedDistanceBand = currentBand
+            consecutiveBandFrames = 0
 
             DispatchQueue.main.async {
                 let alertType: NavigationAlert.AlertType = nearestDistance < 1.0 ? .danger : .warning
@@ -977,15 +1023,16 @@ class NavigationModel: NSObject, ObservableObject {
             }
         } else if pathClear && nearestDistance >= 3.0 {
             guard now.timeIntervalSince(lastPathClearTime) > pathClearCooldown else { return }
-            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 2.0 else { return }
+            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 5.0 else { return }
 
             lastPathClearTime = now
             lastFOVAlertMessage = ""
-            lastAnnouncedDistanceBand = 0  // Reset distance bands when path clears
+            lastAnnouncedDistanceBand = 0
+            consecutiveBandFrames = 0
 
             DispatchQueue.main.async {
                 if self.speechEnabled {
-                    self.speak("Path clear, move forward", priority: 1)
+                    self.speak("Path clear", priority: 1)
                 }
             }
         }
@@ -1101,23 +1148,31 @@ class NavigationModel: NSObject, ObservableObject {
         return n
     }
 
-    // MARK: - Speech (priority-aware with emergency support)
+    // MARK: - Speech (priority-aware with global cooldown)
     /// Priority levels: 1=info, 2=warning, 3=danger, 4=critical, 5=emergency (STOP)
+    /// Non-emergency speech respects a global gap so alerts don't overlap / become annoying.
     func speak(_ text: String, priority: Int = 1) {
         guard speechEnabled else { return }
 
-        // Priority >= 2 interrupts current speech; 5 always interrupts
-        if priority >= 2 && speechSynthesizer.isSpeaking {
+        let now = Date()
+
+        // Priority < 4: enforce global speech gap to prevent chatter
+        if priority < 4 {
+            guard now.timeIntervalSince(lastSpokeTime) > globalSpeechGap else { return }
+            guard !speechSynthesizer.isSpeaking else { return }
+        }
+
+        // Priority 4-5: interrupt current speech for safety-critical messages
+        if priority >= 4 && speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
-        guard !speechSynthesizer.isSpeaking || priority >= 5 else { return }
-        if priority >= 5 { speechSynthesizer.stopSpeaking(at: .immediate) }
+
+        lastSpokeTime = now
 
         let u = AVSpeechUtterance(string: text)
-        // Faster speech rate for emergencies so message is heard quickly
-        u.rate = priority >= 4 ? 0.55 : 0.5
+        u.rate = priority >= 4 ? 0.55 : 0.48
         u.volume = 1.0
-        u.pitchMultiplier = priority >= 4 ? 1.15 : 1.0  // Slightly higher pitch for urgency
+        u.pitchMultiplier = priority >= 4 ? 1.15 : 1.0
         speechSynthesizer.speak(u)
     }
 

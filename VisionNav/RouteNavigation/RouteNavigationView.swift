@@ -30,8 +30,8 @@ struct RouteNavigationView: View {
     @State private var lastFOVScale: CGFloat = 1.0
 
     // Timers — only connect when navigating to avoid wasting main thread cycles
-    @State private var detectionTimer: Timer.TimerPublisher = Timer.publish(every: 0.15, on: .main, in: .common)
-    @State private var voiceTimer: Timer.TimerPublisher = Timer.publish(every: 8.0, on: .main, in: .common)
+    @State private var detectionTimer: Timer.TimerPublisher = Timer.publish(every: 0.25, on: .main, in: .common)
+    @State private var voiceTimer: Timer.TimerPublisher = Timer.publish(every: 12.0, on: .main, in: .common)
     @State private var detectionTimerCancellable: Cancellable?
     @State private var voiceTimerCancellable: Cancellable?
 
@@ -780,6 +780,30 @@ struct RouteNavigationView: View {
 
             Spacer()
 
+            // Route calculation loading indicator
+            if locationManager.isCalculatingRoute {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .tint(.blue)
+                    Text("Finding route to \(locationManager.destinationName)...")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                    Text("Trying multiple routing services")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(UIColor.systemGray6)))
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                .animation(.easeInOut(duration: 0.3), value: locationManager.isCalculatingRoute)
+                .accessibilityLabel("Calculating route to \(locationManager.destinationName)")
+            }
+
             if locationManager.isRouteCalculated {
                 Button { startNavigation() } label: {
                     HStack {
@@ -1094,7 +1118,7 @@ struct HighlightedRouteMapView: UIViewRepresentable {
     }
 }
 
-// MARK: - Voice Input Manager
+// MARK: - Voice Input Manager (English-India locale + Nepali place name hints)
 class VoiceInputManager: ObservableObject {
     @Published var isListening = false
     @Published var recognizedText = ""
@@ -1105,8 +1129,50 @@ class VoiceInputManager: ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var audioEngine: AVAudioEngine?
 
+    // Common Nepali place names as contextual hints for the recognizer
+    private let nepaliPlaceHints: [String] = [
+        "Thamel", "Patan", "Bhaktapur", "Kathmandu", "Lalitpur", "Kirtipur",
+        "Boudha", "Boudhanath", "Swayambhunath", "Pashupatinath", "Durbar Square",
+        "Asan", "Basantapur", "Jawalakhel", "Pulchowk", "Kalanki", "Chabahil",
+        "Balaju", "Gongabu", "Koteshwor", "Baneshwor", "Maharajgunj", "Lazimpat",
+        "Naxal", "Battisputali", "Gaushala", "Ratna Park", "Sundhara", "Tripureshwor",
+        "Thapathali", "Kalimati", "Balkhu", "Satdobato", "Lagankhel", "Mangalbazar",
+        "Kumaripati", "Jawlakhel", "Ekantakuna", "Naya Bus Park", "Gwarko",
+        "Imadol", "Lubhu", "Godawari", "Budhanilkantha", "Tokha", "Jorpati",
+        "Suryabinayak", "Thimi", "Lokanthali", "Jadibuti", "Sinamangal",
+        "Banasthali", "Chakrapath", "Ring Road", "Bagbazar", "Putalisadak",
+        "New Road", "Freak Street", "Singha Durbar", "Maitighar", "Babarmahal"
+    ]
+
+    // Phonetic correction map — common misrecognitions → correct Nepali names
+    private let phoneticCorrections: [String: String] = [
+        "tom el": "Thamel", "tummel": "Thamel", "tamil": "Thamel",
+        "pot on": "Patan", "button": "Patan", "patton": "Patan",
+        "back to poor": "Bhaktapur", "doctor poor": "Bhaktapur",
+        "bow da": "Boudha", "buddha": "Boudha", "buddha nath": "Boudhanath",
+        "cut man do": "Kathmandu", "katman do": "Kathmandu",
+        "let it poor": "Lalitpur", "lalit poor": "Lalitpur",
+        "kirty poor": "Kirtipur", "kirthi poor": "Kirtipur",
+        "pasta patty nath": "Pashupatinath", "push patti nath": "Pashupatinath",
+        "swan boo nath": "Swayambhunath", "monkey temple": "Swayambhunath",
+        "rat na park": "Ratna Park", "ratna park": "Ratna Park",
+        "gone ga boo": "Gongabu", "ganga boo": "Gongabu",
+        "cola tea shore": "Koteshwor", "coat is war": "Koteshwor",
+        "bunny shore": "Baneshwor", "burnished war": "Baneshwor",
+        "jaw la cal": "Jawalakhel", "jaw luck hell": "Jawalakhel",
+        "pull chalk": "Pulchowk", "pull choke": "Pulchowk",
+        "call on key": "Kalanki", "calendar key": "Kalanki",
+        "naya bus park": "Naya Bus Park", "new bus park": "Naya Bus Park"
+    ]
+
     init() {
-        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        // en-IN (English India) handles South Asian accents much better than en-US
+        // and still recognizes standard English place names
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-IN"))
+        // Fallback to en-US if en-IN is unavailable on this device
+        if speechRecognizer == nil || !speechRecognizer!.isAvailable {
+            speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        }
     }
 
     func requestPermission() {
@@ -1132,6 +1198,8 @@ class VoiceInputManager: ObservableObject {
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let request = recognitionRequest else { return }
         request.shouldReportPartialResults = true
+        // Provide Nepali place names as contextual hints to improve recognition
+        request.contextualStrings = nepaliPlaceHints
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -1144,7 +1212,9 @@ class VoiceInputManager: ObservableObject {
 
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, _ in
             if let result = result {
-                DispatchQueue.main.async { self?.recognizedText = result.bestTranscription.formattedString }
+                let raw = result.bestTranscription.formattedString
+                let corrected = self?.applyPhoneticCorrections(raw) ?? raw
+                DispatchQueue.main.async { self?.recognizedText = corrected }
             }
         }
 
@@ -1161,6 +1231,22 @@ class VoiceInputManager: ObservableObject {
         recognitionTask = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         DispatchQueue.main.async { self.isListening = false }
+    }
+
+    /// Post-processing: fix common phonetic misrecognitions of Nepali place names
+    private func applyPhoneticCorrections(_ text: String) -> String {
+        var result = text
+        let lowered = text.lowercased()
+
+        for (misheard, correct) in phoneticCorrections {
+            if lowered.contains(misheard) {
+                // Case-insensitive replacement
+                if let range = result.range(of: misheard, options: .caseInsensitive) {
+                    result.replaceSubrange(range, with: correct)
+                }
+            }
+        }
+        return result
     }
 }
 

@@ -118,7 +118,7 @@ class NavigationCameraManager: NSObject, ObservableObject {
     // Frame throttling — skip frames to avoid overwhelming the main thread
     private let depthQueue = DispatchQueue(label: "depthAnalysis", qos: .userInitiated)
     private var lastDepthAnalysisTime: TimeInterval = 0
-    private let depthAnalysisInterval: TimeInterval = 0.1  // Max 10 depth analyses per second
+    private let depthAnalysisInterval: TimeInterval = 0.2  // Max 5 depth analyses per second (saves CPU)
     private var isAnalyzingDepth = false
 
     override init() {
