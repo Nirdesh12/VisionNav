@@ -34,8 +34,11 @@ public struct NavigationDetection: Identifiable {
     ]
 
     static let guidanceClasses: Set<String> = [
-        "tactile_paving", "stairs", "crosswalk", "zebra_crossing",
-        "tactile paving", "staircase", "steps"
+        // Seg model custom classes
+        "blind path", "stair", "stairs",
+        "horizontal-directional-tactile", "vertical-directional-tactile", "warning-tactile",
+        // Legacy/detection model names
+        "tactile_paving", "crosswalk", "zebra_crossing", "tactile paving", "staircase", "steps"
     ]
 }
 
@@ -118,8 +121,18 @@ class NavigationModel: NSObject, ObservableObject {
     private var lastFOVObstacleAlertTime: Date = .distantPast
     private var lastPathClearTime: Date = .distantPast
     private var lastFOVAlertMessage: String = ""
-    private let fovAlertCooldown: TimeInterval = 4.0
-    private let pathClearCooldown: TimeInterval = 6.0
+    private var lastAnnouncedDistanceBand: Int = 0  // 0=none, 1=3m, 2=2m, 3=1m, 4=stop
+
+    // Safety-tuned cooldowns — shorter for danger, longer for info
+    private let emergencyCooldown: TimeInterval = 1.0
+    private let dangerCooldown: TimeInterval = 1.5
+    private let warningCooldown: TimeInterval = 3.0
+    private let fovAlertCooldown: TimeInterval = 3.0
+    private let pathClearCooldown: TimeInterval = 8.0
+    private let stairCooldown: TimeInterval = 3.0
+    private let dropOffCooldown: TimeInterval = 2.0
+    private var lastEmergencyAlertTime: Date = .distantPast
+    private var lastDropOffAlertTime: Date = .distantPast
 
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var currentDepthData: ARDepthData?
@@ -127,16 +140,26 @@ class NavigationModel: NSObject, ObservableObject {
 
     // Throttle segmentation mask rendering — no need to render every frame
     private var lastSegmentationRenderTime: Date = .distantPast
-    private let segmentationRenderInterval: TimeInterval = 0.3  // Max ~3 mask renders per second
+    private let segmentationRenderInterval: TimeInterval = 0.3
 
     // Stair counting & direction callbacks — set by the view to call NavigationCameraManager
     var stairCountProvider: ((CGRect, ARDepthData?) -> Int)?
     var stairDirectionProvider: ((CGRect, ARDepthData?) -> StairDirection)?
     var onDistanceUpdate: ((Float) -> Void)?
 
-    // COCO 80 class names + extended custom classes for navigation assistance
-    // Indices 0-79 = standard COCO, 80+ = custom-trained classes (adjust to match your model)
-    private let classNames: [String] = [
+    // Model-specific class name mappings (discovered from model metadata)
+    // The seg model (yolov26s-seg) was custom-trained with 6 navigation classes
+    private let segModelClasses: [String] = [
+        "blind path",                        // 0 — walkable path guidance
+        "horizontal-directional-tactile",    // 1 — tactile paving (follow direction)
+        "stair",                             // 2 — single stair / staircase
+        "stairs",                            // 3 — stairs / staircase
+        "vertical-directional-tactile",      // 4 — tactile paving (crossing indicator)
+        "warning-tactile"                    // 5 — tactile warning (edge/stop)
+    ]
+
+    // Standard COCO 80 for the detection model (yolov26s)
+    private let cocoClasses: [String] = [
         "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
         "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
         "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
@@ -146,10 +169,13 @@ class NavigationModel: NSObject, ObservableObject {
         "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
         "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
         "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
-        "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
-        // Extended custom classes (indices 80+) — adjust order to match your custom-trained model
-        "tactile_paving", "stairs", "crosswalk", "zebra_crossing", "staircase", "steps"
+        "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
     ]
+
+    /// Returns the correct class names based on which model is loaded
+    private var activeClassNames: [String] {
+        modelName.lowercased().contains("seg") ? segModelClasses : cocoClasses
+    }
 
     override init() {
         super.init()
@@ -288,7 +314,7 @@ class NavigationModel: NSObject, ObservableObject {
                 let name = detection.label.lowercased()
                 allResults.append(detection)
 
-                if name.contains("tactile") || name.contains("paving") {
+                if name.contains("tactile") || name.contains("paving") || name.contains("blind path") {
                     foundTactilePaving = true
                     tactileBox = detection.boundingBox
                 }
@@ -381,9 +407,10 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Parse Raw YOLO Tensor Output
+    // MARK: - Parse Raw YOLO Tensor Output (stride-safe)
     /// Parses raw MLMultiArray output from YOLO mlProgram models (post-NMS format).
-    /// Detection tensor: [1, N, 6] or [1, N, 38] where each detection = [x1, y1, x2, y2, conf, class_id, ...mask_coeffs]
+    /// Uses MLMultiArray strides for correct memory access regardless of layout.
+    /// Detection tensor: [1, N, 6] or [1, N, 38] = [x1, y1, x2, y2, conf, class_id, ...mask_coeffs]
     /// Mask prototypes (seg model only): [1, 32, H, W]
     private func parseRawYOLODetections(from results: [VNObservation]) -> (detections: [NavigationDetection], maskPrototypes: MLMultiArray?, detectionTensor: MLMultiArray?) {
         var detectionArray: MLMultiArray?
@@ -396,10 +423,8 @@ class NavigationModel: NSObject, ObservableObject {
             let shape = multiArray.shape.map { $0.intValue }
 
             if shape.count == 3 && shape[1] <= 500 && shape[2] >= 6 {
-                // Detection tensor: [1, N, 6+] — post-NMS detections
                 detectionArray = multiArray
             } else if shape.count == 4 && shape[1] == 32 && shape[2] > 50 {
-                // Segmentation mask prototypes: [1, 32, H, W]
                 maskPrototypes = multiArray
             }
         }
@@ -410,38 +435,44 @@ class NavigationModel: NSObject, ObservableObject {
         let numDetections = shape[1]
         let fieldsPerDetection = shape[2]
 
+        // CRITICAL: Use MLMultiArray strides for correct memory access
+        // MLMultiArray may be column-major or have non-contiguous strides
+        let strides = detArray.strides.map { $0.intValue }
+        let stride1 = strides[1]  // stride between detections
+        let stride2 = strides[2]  // stride between fields within a detection
         let pointer = detArray.dataPointer.bindMemory(to: Float32.self, capacity: detArray.count)
 
         var detections: [NavigationDetection] = []
         let inputSize: CGFloat = 640.0
+        let names = activeClassNames
 
         for i in 0..<numDetections {
-            let base = i * fieldsPerDetection
-            let x1 = CGFloat(pointer[base + 0])
-            let y1 = CGFloat(pointer[base + 1])
-            let x2 = CGFloat(pointer[base + 2])
-            let y2 = CGFloat(pointer[base + 3])
-            let confidence = pointer[base + 4]
-            let classId = Int(pointer[base + 5])
+            let detOffset = i * stride1
+            let x1 = CGFloat(pointer[detOffset + 0 * stride2])
+            let y1 = CGFloat(pointer[detOffset + 1 * stride2])
+            let x2 = CGFloat(pointer[detOffset + 2 * stride2])
+            let y2 = CGFloat(pointer[detOffset + 3 * stride2])
+            let confidence = pointer[detOffset + 4 * stride2]
+            let classId = Int(round(pointer[detOffset + 5 * stride2]))
 
             // Skip low-confidence detections (includes zero-padded NMS slots)
             guard confidence >= confidenceThreshold else { continue }
-            guard x2 > x1, y2 > y1 else { continue }  // Valid box
+            guard x2 > x1, y2 > y1 else { continue }
             guard classId >= 0 else { continue }
 
             // Convert from pixel coordinates (0-640, top-left origin) to
             // Vision normalized coordinates (0-1, bottom-left origin, y-up)
             let normX = x1 / inputSize
-            let normY = 1.0 - (y2 / inputSize)  // Flip y: YOLO y2 (bottom) → Vision origin
+            let normY = 1.0 - (y2 / inputSize)
             let normW = (x2 - x1) / inputSize
             let normH = (y2 - y1) / inputSize
 
             let box = CGRect(x: normX, y: normY, width: normW, height: normH)
 
-            // Map class ID to name
+            // Map class ID to model-specific name
             let name: String
-            if classId < classNames.count {
-                name = classNames[classId]
+            if classId < names.count {
+                name = names[classId]
             } else {
                 name = "object_\(classId)"
             }
@@ -466,13 +497,13 @@ class NavigationModel: NSObject, ObservableObject {
         return (detections, maskPrototypes, detectionArray)
     }
 
-    // MARK: - Render Instance Segmentation from Prototypes + Coefficients
+    // MARK: - Render Instance Segmentation from Prototypes + Coefficients (stride-safe)
     /// Computes per-instance masks: mask_i = sigmoid(sum(coeff_k * prototype_k)), cropped to bbox
     private func renderInstanceSegmentation(detectionTensor: MLMultiArray, prototypes: MLMultiArray, inputSize: CGFloat) -> UIImage? {
         let detShape = detectionTensor.shape.map { $0.intValue }
         let protoShape = prototypes.shape.map { $0.intValue }
 
-        guard detShape.count == 3, detShape[2] > 6 else { return nil } // Need mask coefficients
+        guard detShape.count == 3, detShape[2] > 6 else { return nil }
         guard protoShape.count == 4, protoShape[1] == 32 else { return nil }
 
         let numDets = detShape[1]
@@ -483,34 +514,40 @@ class NavigationModel: NSObject, ObservableObject {
 
         guard maskW > 0, maskH > 0 else { return nil }
 
+        // Use strides for correct memory access
+        let detStrides = detectionTensor.strides.map { $0.intValue }
+        let detS1 = detStrides[1]; let detS2 = detStrides[2]
+        let protoStrides = prototypes.strides.map { $0.intValue }
+        let protoS1 = protoStrides[1]; let protoS2 = protoStrides[2]; let protoS3 = protoStrides[3]
+
         let detPtr = detectionTensor.dataPointer.bindMemory(to: Float32.self, capacity: detectionTensor.count)
         let protoPtr = prototypes.dataPointer.bindMemory(to: Float32.self, capacity: prototypes.count)
 
         var pixels = [UInt8](repeating: 0, count: maskW * maskH * 4)
 
         for i in 0..<numDets {
-            let base = i * fieldsPerDet
-            let conf = detPtr[base + 4]
+            let detOff = i * detS1
+            let conf = detPtr[detOff + 4 * detS2]
             guard conf >= confidenceThreshold else { continue }
-            let classId = Int(detPtr[base + 5])
+            let classId = Int(round(detPtr[detOff + 5 * detS2]))
 
             // Bounding box in mask space
-            let bx1 = max(0, Int(CGFloat(detPtr[base + 0]) / inputSize * CGFloat(maskW)))
-            let by1 = max(0, Int(CGFloat(detPtr[base + 1]) / inputSize * CGFloat(maskH)))
-            let bx2 = min(maskW, Int(CGFloat(detPtr[base + 2]) / inputSize * CGFloat(maskW)))
-            let by2 = min(maskH, Int(CGFloat(detPtr[base + 3]) / inputSize * CGFloat(maskH)))
+            let bx1 = max(0, Int(CGFloat(detPtr[detOff + 0 * detS2]) / inputSize * CGFloat(maskW)))
+            let by1 = max(0, Int(CGFloat(detPtr[detOff + 1 * detS2]) / inputSize * CGFloat(maskH)))
+            let bx2 = min(maskW, Int(CGFloat(detPtr[detOff + 2 * detS2]) / inputSize * CGFloat(maskW)))
+            let by2 = min(maskH, Int(CGFloat(detPtr[detOff + 3 * detS2]) / inputSize * CGFloat(maskH)))
 
             guard bx2 > bx1, by2 > by1 else { continue }
 
-            // Extract 32 mask coefficients
-            let coeffs = (0..<min(numProtos, fieldsPerDet - 6)).map { detPtr[base + 6 + $0] }
+            // Extract 32 mask coefficients using strides
+            let coeffs = (0..<min(numProtos, fieldsPerDet - 6)).map { detPtr[detOff + (6 + $0) * detS2] }
 
-            // Compute mask within bounding box: sigmoid(sum(coeff_k * prototype_k[y][x]))
+            // Compute mask: sigmoid(sum(coeff_k * prototype_k[y][x]))
             for y in by1..<by2 {
                 for x in bx1..<bx2 {
                     var sum: Float = 0
                     for k in 0..<coeffs.count {
-                        let protoIdx = k * maskH * maskW + y * maskW + x
+                        let protoIdx = k * protoS1 + y * protoS2 + x * protoS3
                         guard protoIdx < prototypes.count else { continue }
                         sum += coeffs[k] * protoPtr[protoIdx]
                     }
@@ -518,7 +555,7 @@ class NavigationModel: NSObject, ObservableObject {
                     if maskVal > 0.5 {
                         let pixIdx = (y * maskW + x) * 4
                         guard pixIdx + 3 < pixels.count else { continue }
-                        colorForSegmentationClass(classId < 80 ? (classId % 20) + 1 : classId - 76, pixels: &pixels, at: pixIdx)
+                        colorForNavClass(classId, pixels: &pixels, at: pixIdx)
                     }
                 }
             }
@@ -665,6 +702,24 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
+    /// Color for the seg model's 6 navigation classes (used in instance segmentation rendering)
+    private func colorForNavClass(_ classId: Int, pixels: inout [UInt8], at offset: Int) {
+        switch classId {
+        case 0: // blind path — subtle green
+            pixels[offset] = 0; pixels[offset + 1] = 200; pixels[offset + 2] = 100; pixels[offset + 3] = 60
+        case 1: // horizontal-directional-tactile — bright yellow
+            pixels[offset] = 255; pixels[offset + 1] = 230; pixels[offset + 2] = 0; pixels[offset + 3] = 120
+        case 2, 3: // stair / stairs — orange
+            pixels[offset] = 255; pixels[offset + 1] = 140; pixels[offset + 2] = 0; pixels[offset + 3] = 120
+        case 4: // vertical-directional-tactile — yellow
+            pixels[offset] = 255; pixels[offset + 1] = 210; pixels[offset + 2] = 0; pixels[offset + 3] = 120
+        case 5: // warning-tactile — red/orange warning
+            pixels[offset] = 255; pixels[offset + 1] = 80; pixels[offset + 2] = 0; pixels[offset + 3] = 140
+        default: // COCO or unknown — light blue
+            pixels[offset] = 100; pixels[offset + 1] = 180; pixels[offset + 2] = 255; pixels[offset + 3] = 50
+        }
+    }
+
     // MARK: - Tactile Paving Position Analysis
     private func analyzeTactilePavingPosition(_ box: CGRect) {
         // Vision bounding box: origin bottom-left, x right, y up, normalized 0-1
@@ -705,14 +760,14 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Stairs Analysis with LiDAR (YOLO-confirmed only)
-    /// Called only when YOLO detects stairs. Uses LiDAR for step count and up/down direction.
+    // MARK: - Stairs Analysis with LiDAR (YOLO-confirmed)
+    /// Called when YOLO detects stairs. Uses LiDAR for step count, direction, and proximity alerts.
     private func analyzeStairsWithLiDAR(boundingBox: CGRect) {
         let count = stairCountProvider?(boundingBox, currentDepthData) ?? 0
         let direction = stairDirectionProvider?(boundingBox, currentDepthData) ?? .unknown
         let dist = getDepth(at: boundingBox)
         let now = Date()
-        let shouldAlert = now.timeIntervalSince(lastStairAlertTime) > 5.0
+        let shouldAlert = now.timeIntervalSince(lastStairAlertTime) > stairCooldown
 
         DispatchQueue.main.async {
             self.stairsDetected = true
@@ -722,21 +777,42 @@ class NavigationModel: NSObject, ObservableObject {
             if shouldAlert {
                 self.lastStairAlertTime = now
                 var message: String
-                if count > 0 {
-                    let dirStr = direction != .unknown ? " \(direction.rawValue)" : ""
-                    message = "\(count) steps\(dirStr) ahead"
-                } else {
-                    let dirStr = direction != .unknown ? " \(direction.rawValue)" : ""
-                    message = "Stairs\(dirStr) detected ahead"
-                }
+
+                // Build descriptive stair message
+                let dirStr = direction != .unknown ? " \(direction.rawValue)" : ""
+
                 if let d = dist {
-                    message += String(format: " at %.1f meters", d)
+                    if d < 0.5 {
+                        // At the stairs
+                        message = "Stairs at your feet\(dirStr). Hold the railing"
+                    } else if d < 1.5 {
+                        // Very close
+                        if count > 0 {
+                            message = "\(count) steps\(dirStr), \(String(format: "%.0f", d * 100)) centimeters ahead"
+                        } else {
+                            message = "Stairs\(dirStr) very close, watch your step"
+                        }
+                    } else {
+                        // Approaching
+                        if count > 0 {
+                            message = "Stairs ahead, \(count) steps\(dirStr), \(String(format: "%.1f", d)) meters"
+                        } else {
+                            message = "Stairs\(dirStr) detected, \(String(format: "%.1f", d)) meters ahead"
+                        }
+                    }
+                } else {
+                    if count > 0 {
+                        message = "\(count) steps\(dirStr) ahead"
+                    } else {
+                        message = "Stairs\(dirStr) detected ahead"
+                    }
                 }
 
-                let alert = NavigationAlert(message: message, alertType: .stairs, priority: 3)
+                let priority = (dist ?? 999) < 1.0 ? 4 : 3
+                let alert = NavigationAlert(message: message, alertType: .stairs, priority: priority)
                 self.currentAlert = alert
                 if self.speechEnabled {
-                    self.speak(message, priority: 3)
+                    self.speak(message, priority: priority)
                 }
             }
         }
@@ -800,9 +876,9 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - FOV-Based Obstacle Avoidance (LiDAR Priority)
-    /// Processes continuous LiDAR zone data for directional obstacle warnings and "path clear" guidance.
-    /// Runs independently of YOLO — ensures LiDAR always triggers obstacle warnings.
+    // MARK: - FOV-Based Obstacle Avoidance with Progressive Distance Alerts
+    /// Processes continuous LiDAR zone data for directional obstacle warnings, emergency STOP,
+    /// progressive distance callouts, and "path clear" guidance.
     func handleFOVObstacleAvoidance(
         obstacleInFOV: Bool,
         obstacleDirection: String,
@@ -819,9 +895,24 @@ class NavigationModel: NSObject, ObservableObject {
         // Don't overlap with stair alerts
         if stairsDetected { return }
 
-        if obstacleInFOV && nearestDistance < 3.0 {
-            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > fovAlertCooldown else { return }
+        // === EMERGENCY STOP: < 0.3m ===
+        if nearestDistance < 0.3 && nearestDistance > 0.05 {
+            guard now.timeIntervalSince(lastEmergencyAlertTime) > emergencyCooldown else { return }
+            lastEmergencyAlertTime = now
+            lastAnnouncedDistanceBand = 4
 
+            DispatchQueue.main.async {
+                let alert = NavigationAlert(message: "Stop!", alertType: .danger, priority: 5)
+                self.currentAlert = alert
+                if self.speechEnabled {
+                    self.speak("Stop!", priority: 5)
+                }
+            }
+            return
+        }
+
+        // === Progressive distance callouts with directional guidance ===
+        if obstacleInFOV && nearestDistance < 3.0 {
             let suggestedDir = suggestAvoidanceDirection(
                 obstacleDir: obstacleDirection,
                 leftDist: leftZoneDistance,
@@ -831,23 +922,57 @@ class NavigationModel: NSObject, ObservableObject {
                 userHeading: userHeading
             )
 
+            // Determine distance band for progressive callouts
+            let currentBand: Int
             let message: String
-            if nearestDistance < 2.0 {
+            let priority: Int
+            let cooldown: TimeInterval
+
+            if nearestDistance < 0.5 {
+                currentBand = 4
+                message = "Very close! Move \(suggestedDir) now"
+                priority = 4
+                cooldown = dangerCooldown
+            } else if nearestDistance < 1.0 {
+                currentBand = 3
                 message = "Obstacle very close, move \(suggestedDir)"
+                priority = 3
+                cooldown = dangerCooldown
+            } else if nearestDistance < 2.0 {
+                currentBand = 2
+                // Describe which side obstacle is on
+                let sideDesc: String
+                switch obstacleDirection {
+                case "left": sideDesc = "Something on your left, move \(suggestedDir)"
+                case "right": sideDesc = "Something on your right, move \(suggestedDir)"
+                default: sideDesc = "Obstacle ahead, move \(suggestedDir)"
+                }
+                message = sideDesc
+                priority = 3
+                cooldown = warningCooldown
             } else {
-                message = "Obstacle ahead, move \(suggestedDir)"
+                currentBand = 1
+                message = "Obstacle ahead, \(String(format: "%.0f", nearestDistance)) meters"
+                priority = 2
+                cooldown = fovAlertCooldown
             }
 
-            guard message != lastFOVAlertMessage || now.timeIntervalSince(lastFOVObstacleAlertTime) > fovAlertCooldown else { return }
+            // Only announce if entering a new (closer) distance band or cooldown expired
+            let bandChanged = currentBand > lastAnnouncedDistanceBand
+            let cooldownExpired = now.timeIntervalSince(lastFOVObstacleAlertTime) > cooldown
+
+            guard bandChanged || cooldownExpired else { return }
 
             lastFOVObstacleAlertTime = now
             lastFOVAlertMessage = message
+            lastAnnouncedDistanceBand = currentBand
 
             DispatchQueue.main.async {
-                let alert = NavigationAlert(message: message, alertType: .warning, priority: 3)
+                let alertType: NavigationAlert.AlertType = nearestDistance < 1.0 ? .danger : .warning
+                let alert = NavigationAlert(message: message, alertType: alertType, priority: priority)
                 self.currentAlert = alert
                 if self.speechEnabled {
-                    self.speak(message, priority: 3)
+                    self.speak(message, priority: priority)
                 }
             }
         } else if pathClear && nearestDistance >= 3.0 {
@@ -856,12 +981,72 @@ class NavigationModel: NSObject, ObservableObject {
 
             lastPathClearTime = now
             lastFOVAlertMessage = ""
+            lastAnnouncedDistanceBand = 0  // Reset distance bands when path clears
 
             DispatchQueue.main.async {
                 if self.speechEnabled {
                     self.speak("Path clear, move forward", priority: 1)
                 }
             }
+        }
+    }
+
+    // MARK: - LiDAR Stair Detection Handler (YOLO-independent)
+    /// Processes LiDAR-only stair detection as a safety fallback when YOLO misses stairs.
+    func handleLiDARStairDetection(
+        lidarDetected: Bool, lidarCount: Int,
+        lidarDirection: StairDirection, lidarDistance: Float
+    ) {
+        // If YOLO already detected stairs, let YOLO handle it (has bounding box for better accuracy)
+        if stairsDetected { return }
+
+        let now = Date()
+        guard lidarDetected else {
+            // Only clear LiDAR stair state if YOLO also doesn't see stairs
+            return
+        }
+
+        guard now.timeIntervalSince(lastStairAlertTime) > stairCooldown else { return }
+        lastStairAlertTime = now
+
+        let dirStr = lidarDirection != .unknown ? " \(lidarDirection.rawValue)" : ""
+        var message: String
+        if lidarDistance < 0.5 {
+            message = "Stairs at your feet\(dirStr). Hold the railing"
+        } else if lidarCount > 0 {
+            message = "Stairs ahead, \(lidarCount) steps\(dirStr), \(String(format: "%.1f", lidarDistance)) meters"
+        } else {
+            message = "Stairs\(dirStr) detected, \(String(format: "%.1f", lidarDistance)) meters ahead"
+        }
+
+        let priority = lidarDistance < 1.0 ? 4 : 3
+        DispatchQueue.main.async {
+            self.stairsDetected = true
+            self.stairCount = lidarCount
+            self.stairDirection = lidarDirection
+            let alert = NavigationAlert(message: message, alertType: .stairs, priority: priority)
+            self.currentAlert = alert
+            if self.speechEnabled { self.speak(message, priority: priority) }
+        }
+    }
+
+    // MARK: - Drop-off Detection Handler
+    /// Processes LiDAR drop-off detection for curbs, step-downs, and platform edges.
+    func handleDropOffDetection(detected: Bool, dropDepth: Float) {
+        guard detected, dropDepth > 0.3 else { return }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastDropOffAlertTime) > dropOffCooldown else { return }
+        lastDropOffAlertTime = now
+
+        let cm = Int(dropDepth * 100)
+        let message = cm > 50 ? "Warning! Large drop ahead" : "Caution, step down ahead, \(cm) centimeters"
+        let priority = cm > 50 ? 5 : 4
+
+        DispatchQueue.main.async {
+            let alert = NavigationAlert(message: message, alertType: .danger, priority: priority)
+            self.currentAlert = alert
+            if self.speechEnabled { self.speak(message, priority: priority) }
         }
     }
 
@@ -916,16 +1101,23 @@ class NavigationModel: NSObject, ObservableObject {
         return n
     }
 
-    // MARK: - Speech
+    // MARK: - Speech (priority-aware with emergency support)
+    /// Priority levels: 1=info, 2=warning, 3=danger, 4=critical, 5=emergency (STOP)
     func speak(_ text: String, priority: Int = 1) {
         guard speechEnabled else { return }
+
+        // Priority >= 2 interrupts current speech; 5 always interrupts
         if priority >= 2 && speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
-        guard !speechSynthesizer.isSpeaking else { return }
+        guard !speechSynthesizer.isSpeaking || priority >= 5 else { return }
+        if priority >= 5 { speechSynthesizer.stopSpeaking(at: .immediate) }
+
         let u = AVSpeechUtterance(string: text)
-        u.rate = 0.5
+        // Faster speech rate for emergencies so message is heard quickly
+        u.rate = priority >= 4 ? 0.55 : 0.5
         u.volume = 1.0
+        u.pitchMultiplier = priority >= 4 ? 1.15 : 1.0  // Slightly higher pitch for urgency
         speechSynthesizer.speak(u)
     }
 

@@ -971,6 +971,20 @@ struct RouteNavigationView: View {
             routeBearing: locationManager.isRouteCalculated ? locationManager.currentRouteBearing : nil,
             userHeading: locationManager.isRouteCalculated ? locationManager.userHeading : nil
         )
+
+        // LiDAR-only stair detection (safety fallback when YOLO misses stairs)
+        navigationModel.handleLiDARStairDetection(
+            lidarDetected: cameraManager.lidarStairsDetected,
+            lidarCount: cameraManager.lidarStairCount,
+            lidarDirection: cameraManager.lidarStairDirection,
+            lidarDistance: cameraManager.lidarStairDistance
+        )
+
+        // LiDAR drop-off detection (curbs, step-downs, platform edges)
+        navigationModel.handleDropOffDetection(
+            detected: cameraManager.dropOffDetected,
+            dropDepth: cameraManager.dropOffDepth
+        )
     }
 }
 

@@ -94,6 +94,19 @@ class NavigationCameraManager: NSObject, ObservableObject {
     @Published var centerZoneDistance: Float = 999
     @Published var rightZoneDistance: Float = 999
 
+    // LiDAR-only stair detection (independent of YOLO — safety fallback)
+    @Published var lidarStairsDetected: Bool = false
+    @Published var lidarStairCount: Int = 0
+    @Published var lidarStairDirection: StairDirection = .unknown
+    @Published var lidarStairDistance: Float = 999
+
+    // LiDAR drop-off detection (curbs, step-downs, platform edges)
+    @Published var dropOffDetected: Bool = false
+    @Published var dropOffDepth: Float = 0
+
+    private var lastLiDARStairTime: TimeInterval = 0
+    private let lidarStairInterval: TimeInterval = 0.3  // Check stairs every 300ms
+
     let arSession = ARSession()
     private var hapticTimer: Timer?
 
@@ -377,6 +390,12 @@ class NavigationCameraManager: NSObject, ObservableObject {
             self.leftZoneDistance = 999
             self.centerZoneDistance = 999
             self.rightZoneDistance = 999
+            self.lidarStairsDetected = false
+            self.lidarStairCount = 0
+            self.lidarStairDirection = .unknown
+            self.lidarStairDistance = 999
+            self.dropOffDetected = false
+            self.dropOffDepth = 0
         }
     }
 
@@ -546,6 +565,174 @@ class NavigationCameraManager: NSObject, ObservableObject {
         }
         return .unknown
     }
+
+    // MARK: - LiDAR-Only Stair Detection (YOLO-independent safety fallback)
+    /// Detects stairs using LiDAR depth patterns in the bottom portion of FOV.
+    /// Looks for regular depth step transitions across multiple vertical strips.
+    /// This runs independently of YOLO as a critical safety backup.
+    private func detectStairsFromLiDAR(_ depthData: ARDepthData) {
+        let depthMap = depthData.depthMap
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
+
+        let fovBox = fovBoxNormalized
+
+        // Focus on bottom 50% of FOV (where stairs would appear in camera)
+        let startY = Int((fovBox.minY + fovBox.height * 0.5) * CGFloat(height))
+        let endY = Int(fovBox.maxY * CGFloat(height))
+        let startX = Int(fovBox.minX * CGFloat(width))
+        let endX = Int(fovBox.maxX * CGFloat(width))
+
+        guard endY > startY + 5, endX > startX + 5 else { return }
+
+        let fovWidth = endX - startX
+        let stripPositions = [startX + fovWidth / 5, startX + 2 * fovWidth / 5,
+                              startX + fovWidth / 2, startX + 3 * fovWidth / 5,
+                              startX + 4 * fovWidth / 5]
+
+        var stripsWithStairs = 0
+        var totalSteps = 0
+        var nearestStairDepth: Float = 999
+
+        for stripX in stripPositions {
+            guard stripX >= 0, stripX < width else { continue }
+
+            // Sample depth profile along this vertical strip
+            var profile: [Float] = []
+            let stepSize = max(1, (endY - startY) / 25)
+
+            for y in stride(from: startY, to: endY, by: stepSize) {
+                guard y >= 0, y < height else { continue }
+                let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
+                let d = ptr[stripX]
+                if d.isFinite && d > 0.1 && d < 5.0 {
+                    profile.append(d)
+                }
+            }
+
+            guard profile.count >= 4 else { continue }
+
+            // Smooth with 3-point average
+            var smoothed: [Float] = []
+            for i in 0..<profile.count {
+                let s = max(0, i - 1)
+                let e = min(profile.count - 1, i + 1)
+                smoothed.append(profile[s...e].reduce(0, +) / Float(e - s + 1))
+            }
+
+            // Count regular depth transitions (step = 12-25cm)
+            var steps = 0
+            var lastIdx = -2
+            for i in 1..<smoothed.count {
+                let change = abs(smoothed[i] - smoothed[i - 1])
+                if change >= 0.10 && change <= 0.28 && (i - lastIdx) >= 2 {
+                    steps += 1
+                    lastIdx = i
+                    nearestStairDepth = min(nearestStairDepth, smoothed[i])
+                }
+            }
+
+            if steps >= 2 {
+                stripsWithStairs += 1
+                totalSteps = max(totalSteps, steps)
+            }
+        }
+
+        // Confirm stairs if majority of strips detect step pattern
+        let detected = stripsWithStairs >= 3
+
+        // Determine direction from depth gradient
+        var direction: StairDirection = .unknown
+        if detected {
+            let midX = (startX + endX) / 2
+            let topY = startY
+            let botY = endY - 1
+            guard topY >= 0, topY < height, botY >= 0, botY < height, midX >= 0, midX < width else {
+                direction = .unknown
+                DispatchQueue.main.async {
+                    self.lidarStairsDetected = detected
+                    self.lidarStairCount = totalSteps
+                    self.lidarStairDirection = direction
+                    self.lidarStairDistance = nearestStairDepth
+                }
+                return
+            }
+            let topD = base.advanced(by: topY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
+            let botD = base.advanced(by: botY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
+            if topD.isFinite && botD.isFinite {
+                let diff = topD - botD
+                if diff > 0.15 { direction = .up }
+                else if diff < -0.15 { direction = .down }
+            }
+        }
+
+        DispatchQueue.main.async {
+            self.lidarStairsDetected = detected
+            self.lidarStairCount = totalSteps
+            self.lidarStairDirection = direction
+            self.lidarStairDistance = nearestStairDepth
+        }
+    }
+
+    // MARK: - LiDAR Drop-off Detection (curbs, step-downs, platform edges)
+    /// Detects sudden depth increases at the bottom of FOV indicating a drop-off.
+    /// Critical safety feature for blind users to avoid falls.
+    private func detectDropOff(_ depthData: ARDepthData) {
+        let depthMap = depthData.depthMap
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
+
+        let fovBox = fovBoxNormalized
+
+        // Compare depth at bottom 15% vs 30-45% of FOV
+        let bottomY = Int(fovBox.maxY * CGFloat(height)) - 2
+        let midY = Int((fovBox.minY + fovBox.height * 0.6) * CGFloat(height))
+        let startX = Int(fovBox.minX * CGFloat(width))
+        let endX = Int(fovBox.maxX * CGFloat(width))
+
+        guard bottomY > midY, endX > startX else { return }
+
+        var bottomSum: Float = 0, bottomCount: Float = 0
+        var midSum: Float = 0, midCount: Float = 0
+        let stepX = max(1, (endX - startX) / 10)
+
+        for x in stride(from: startX, to: endX, by: stepX) {
+            guard x >= 0, x < width else { continue }
+
+            if bottomY >= 0, bottomY < height {
+                let d = base.advanced(by: bottomY * bytesPerRow).assumingMemoryBound(to: Float32.self)[x]
+                if d.isFinite && d > 0.1 && d < 8.0 { bottomSum += d; bottomCount += 1 }
+            }
+            if midY >= 0, midY < height {
+                let d = base.advanced(by: midY * bytesPerRow).assumingMemoryBound(to: Float32.self)[x]
+                if d.isFinite && d > 0.1 && d < 8.0 { midSum += d; midCount += 1 }
+            }
+        }
+
+        guard bottomCount > 2, midCount > 2 else { return }
+
+        let bottomAvg = bottomSum / bottomCount
+        let midAvg = midSum / midCount
+
+        // Drop-off: bottom depth is significantly deeper than mid (ground drops away)
+        let depthDiff = bottomAvg - midAvg
+        let detected = depthDiff > 0.35  // >35cm depth change = drop-off
+
+        DispatchQueue.main.async {
+            self.dropOffDetected = detected
+            self.dropOffDepth = max(0, depthDiff)
+        }
+    }
 }
 
 // MARK: - ARSessionDelegate
@@ -561,8 +748,17 @@ extension NavigationCameraManager: ARSessionDelegate {
                 lastDepthAnalysisTime = now
                 isAnalyzingDepth = true
                 depthQueue.async { [weak self] in
-                    self?.analyzeDepthInFOVBox(d)
-                    self?.isAnalyzingDepth = false
+                    guard let self = self else { return }
+                    self.analyzeDepthInFOVBox(d)
+
+                    // Run LiDAR stair + drop-off detection at lower frequency (every 300ms)
+                    if now - self.lastLiDARStairTime >= self.lidarStairInterval {
+                        self.lastLiDARStairTime = now
+                        self.detectStairsFromLiDAR(d)
+                        self.detectDropOff(d)
+                    }
+
+                    self.isAnalyzingDepth = false
                 }
             }
         }
