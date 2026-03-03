@@ -503,9 +503,18 @@ class NavigationCameraManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Stair Direction Detection (Phase 2)
-    /// Determines whether stairs are going up or down by comparing depth in top vs bottom
-    /// of the YOLO bounding box. Called only after YOLO confirms stairs.
+    // MARK: - Stair Direction Detection (Depth Curve Analysis)
+    /// Determines whether stairs go UP or DOWN by analyzing the SHAPE of the depth curve,
+    /// not just comparing top-vs-bottom depth values.
+    ///
+    /// Key insight: LiDAR depth measures distance-from-camera, not elevation. For both up
+    /// and down stairs, the far end is deeper. But the depth curve SHAPE differs:
+    ///   - Stairs going UP (convex curve): depth increases slowly near (treads face camera),
+    ///     then rapidly far (risers recede). farToMid > midToNear → positive curvature.
+    ///   - Stairs going DOWN (concave curve): depth increases rapidly near (risers drop away),
+    ///     then slowly far (treads are nearly perpendicular). midToNear > farToMid → negative curvature.
+    ///
+    /// Uses device pitch as tiebreaker when curvature is ambiguous.
     func determineStairDirection(boundingBox: CGRect, depthData: ARDepthData?) -> StairDirection {
         guard let depthData = depthData else { return .unknown }
 
@@ -520,56 +529,69 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
         let centerX = Int(boundingBox.midX * CGFloat(width))
         // Vision bounding box: origin bottom-left, y up
-        let topY = Int((1.0 - boundingBox.maxY) * CGFloat(height))
-        let bottomY = Int((1.0 - boundingBox.minY) * CGFloat(height))
+        // In screen/image buffer: topY = far from user, bottomY = near to user
+        let topY = Int((1.0 - boundingBox.maxY) * CGFloat(height))   // far end
+        let bottomY = Int((1.0 - boundingBox.minY) * CGFloat(height)) // near end
 
         guard topY < bottomY, centerX >= 0, centerX < width else { return .unknown }
 
-        let thirdHeight = (bottomY - topY) / 3
-        var topSum: Float = 0, topCount: Float = 0
-        var bottomSum: Float = 0, bottomCount: Float = 0
-
-        let sampleWidth = max(1, Int(boundingBox.width * CGFloat(width) * 0.2))
+        let sampleWidth = max(1, Int(boundingBox.width * CGFloat(width) * 0.3))
         let xStart = max(0, centerX - sampleWidth / 2)
         let xEnd = min(width, centerX + sampleWidth / 2)
 
-        for y in topY..<(topY + thirdHeight) {
+        // Sample 5 depth rows evenly: depthProfile[0] = far end, depthProfile[last] = near end
+        let totalRows = bottomY - topY
+        guard totalRows > 10 else { return .unknown }
+
+        var depthProfile: [Float] = []
+        let numSamples = 5
+        for i in 0..<numSamples {
+            let y = topY + (i * totalRows) / (numSamples - 1)
             guard y >= 0, y < height else { continue }
+
+            var sum: Float = 0
+            var count: Float = 0
             let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
             for x in stride(from: xStart, to: xEnd, by: 2) {
+                guard x >= 0, x < width else { continue }
                 let d = ptr[x]
                 if d.isFinite && d > 0.1 && d < 8.0 {
-                    topSum += d; topCount += 1
+                    sum += d; count += 1
                 }
+            }
+            if count > 0 {
+                depthProfile.append(sum / count)
             }
         }
 
-        for y in (bottomY - thirdHeight)..<bottomY {
-            guard y >= 0, y < height else { continue }
-            let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
-            for x in stride(from: xStart, to: xEnd, by: 2) {
-                let d = ptr[x]
-                if d.isFinite && d > 0.1 && d < 8.0 {
-                    bottomSum += d; bottomCount += 1
-                }
-            }
-        }
+        guard depthProfile.count >= 3 else { return .unknown }
 
-        guard topCount > 0, bottomCount > 0 else { return .unknown }
+        // Analyze depth curve shape using curvature
+        let farDepth = depthProfile[0]                           // far end (top of bbox)
+        let midDepth = depthProfile[depthProfile.count / 2]      // middle
+        let nearDepth = depthProfile[depthProfile.count - 1]     // near end (bottom of bbox)
 
-        let topAvg = topSum / topCount
-        let bottomAvg = bottomSum / bottomCount
+        let farToMid = farDepth - midDepth
+        let midToNear = midDepth - nearDepth
+        let curvature = farToMid - midToNear
 
-        // Top deeper = stairs going up (ascending away from user)
-        // Bottom deeper = stairs going down (descending away from user)
-        let depthDifference = topAvg - bottomAvg
-        let threshold: Float = 0.15
-
-        if depthDifference > threshold {
+        // Convex (curvature > threshold) = UP, Concave (curvature < -threshold) = DOWN
+        let curveThreshold: Float = 0.06
+        if curvature > curveThreshold {
             return .up
-        } else if depthDifference < -threshold {
+        } else if curvature < -curveThreshold {
             return .down
         }
+
+        // Tiebreaker: device pitch (from ARFrame.camera.eulerAngles.x)
+        // Looking down (pitch < -0.4 rad ≈ 23° below horizontal) → more likely DOWN
+        // Looking forward/up (pitch > -0.15 rad) → more likely UP
+        if devicePitch < -0.4 {
+            return .down
+        } else if devicePitch > -0.15 {
+            return .up
+        }
+
         return .unknown
     }
 
@@ -653,14 +675,11 @@ class NavigationCameraManager: NSObject, ObservableObject {
         // Confirm stairs if majority of strips detect step pattern
         let detected = stripsWithStairs >= 3
 
-        // Determine direction from depth gradient
+        // Determine direction using depth curve analysis (same logic as YOLO-confirmed path)
         var direction: StairDirection = .unknown
         if detected {
             let midX = (startX + endX) / 2
-            let topY = startY
-            let botY = endY - 1
-            guard topY >= 0, topY < height, botY >= 0, botY < height, midX >= 0, midX < width else {
-                direction = .unknown
+            guard midX >= 0, midX < width else {
                 DispatchQueue.main.async {
                     self.lidarStairsDetected = detected
                     self.lidarStairCount = totalSteps
@@ -669,12 +688,24 @@ class NavigationCameraManager: NSObject, ObservableObject {
                 }
                 return
             }
-            let topD = base.advanced(by: topY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
-            let botD = base.advanced(by: botY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
-            if topD.isFinite && botD.isFinite {
-                let diff = topD - botD
-                if diff > 0.15 { direction = .up }
-                else if diff < -0.15 { direction = .down }
+            // Sample 3 depth points: top (far), mid, bottom (near)
+            let midY = (startY + endY) / 2
+            let topSampleY = max(0, min(startY, height - 1))
+            let midSampleY = max(0, min(midY, height - 1))
+            let botSampleY = max(0, min(endY - 1, height - 1))
+
+            let topD = base.advanced(by: topSampleY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
+            let midD = base.advanced(by: midSampleY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
+            let botD = base.advanced(by: botSampleY * bytesPerRow).assumingMemoryBound(to: Float32.self)[midX]
+
+            if topD.isFinite && midD.isFinite && botD.isFinite {
+                // Curvature analysis: convex = UP, concave = DOWN
+                let curvature = (topD - midD) - (midD - botD)
+                if curvature > 0.06 { direction = .up }
+                else if curvature < -0.06 { direction = .down }
+                // Tiebreaker: device pitch
+                else if devicePitch < -0.4 { direction = .down }
+                else if devicePitch > -0.15 { direction = .up }
             }
         }
 

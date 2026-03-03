@@ -149,8 +149,9 @@ class NavigationLocationManager: NSObject, ObservableObject {
     @Published var searchResults: [SearchResult] = []
     @Published var isSearching: Bool = false
     
-    // Voice
-    private let speechSynthesizer = AVSpeechSynthesizer()
+    // Voice — routes through NavigationModel's single synthesizer via callback
+    // to prevent two AVSpeechSynthesizer instances from overlapping
+    var centralSpeechCallback: ((String, Int) -> Void)?
     @Published var voiceEnabled: Bool = true
     private var lastVoiceTime: Date = .distantPast
     private var lastSpokenInstruction: String = ""
@@ -195,16 +196,6 @@ class NavigationLocationManager: NSObject, ObservableObject {
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.distanceFilter = 3
         locationManager.headingFilter = 5
-        setupAudioSession()
-    }
-    
-    private func setupAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .voicePrompt, options: [.mixWithOthers, .duckOthers])
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            print("Audio session error: \(error)")
-        }
     }
     
     func requestPermission() {
@@ -216,27 +207,22 @@ class NavigationLocationManager: NSObject, ObservableObject {
         locationManager.startUpdatingHeading()
     }
     
-    // MARK: - Voice Feedback
+    // MARK: - Voice Feedback (routed through central speech callback)
     func speak(_ text: String, force: Bool = false) {
         guard voiceEnabled else { return }
-        
+
         let now = Date()
-        if !force && text == lastSpokenInstruction && now.timeIntervalSince(lastVoiceTime) < 5 {
+        if !force && text == lastSpokenInstruction && now.timeIntervalSince(lastVoiceTime) < 8 {
             return
         }
-        
-        if speechSynthesizer.isSpeaking {
-            speechSynthesizer.stopSpeaking(at: .immediate)
-        }
-        
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = 0.5
-        utterance.volume = 1.0
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        speechSynthesizer.speak(utterance)
-        
+
         lastVoiceTime = now
         lastSpokenInstruction = text
+
+        // Route through NavigationModel's single synthesizer to prevent overlap
+        if let callback = centralSpeechCallback {
+            callback(text, force ? 3 : 2)
+        }
     }
     
     func speakDirection() {

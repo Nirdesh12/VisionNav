@@ -32,6 +32,11 @@ struct RouteNavigationView: View {
     // Tilt guidance state
     @State private var lastTiltWarningTime: Date = .distantPast
 
+    // Movement detection — prevent nav voice before user starts moving
+    @State private var hasStartedMoving: Bool = false
+    @State private var initialLocation: CLLocationCoordinate2D?
+    private let movementThreshold: Double = 5.0 // meters — user must move 5m before nav voice
+
     // Timers — only connect when navigating to avoid wasting main thread cycles
     @State private var detectionTimer: Timer.TimerPublisher = Timer.publish(every: 0.25, on: .main, in: .common)
     @State private var voiceTimer: Timer.TimerPublisher = Timer.publish(every: 12.0, on: .main, in: .common)
@@ -75,21 +80,49 @@ struct RouteNavigationView: View {
             navigationModel.stairDirectionProvider = { [weak cameraManager] box, depth in
                 cameraManager?.determineStairDirection(boundingBox: box, depthData: depth) ?? .unknown
             }
+            // Route LocationManager's speech through NavigationModel's single synthesizer
+            // This prevents two AVSpeechSynthesizer instances from overlapping
+            locationManager.centralSpeechCallback = { [weak navigationModel] text, priority in
+                navigationModel?.speak(text, priority: priority)
+            }
         }
         .onDisappear { endNavigation() }
         .onReceive(detectionTimer) { _ in
             if isNavigating { processFrame() }
         }
         .onReceive(voiceTimer) { _ in
-            if isNavigating && locationManager.isRouteCalculated && !locationManager.hasArrived {
-                locationManager.speakDirection()
-                // Also announce environment
-                locationManager.announceEnvironment(
-                    tactilePaving: navigationModel.tactilePavingDetected,
-                    stairs: navigationModel.stairsDetected,
-                    stairCount: navigationModel.stairCount
-                )
+            guard isNavigating && locationManager.isRouteCalculated && !locationManager.hasArrived else { return }
+
+            // Check if user has started moving (5m from initial position)
+            if !hasStartedMoving {
+                if let userLoc = locationManager.userLocation {
+                    if initialLocation == nil {
+                        initialLocation = userLoc
+                    }
+                    if let start = initialLocation {
+                        let dist = CLLocation(latitude: userLoc.latitude, longitude: userLoc.longitude)
+                            .distance(from: CLLocation(latitude: start.latitude, longitude: start.longitude))
+                        if dist >= movementThreshold {
+                            hasStartedMoving = true
+                        }
+                    }
+                }
+
+                // Before moving, only give a gentle prompt
+                if !hasStartedMoving {
+                    navigationModel.speak("Start walking to begin navigation", priority: 1)
+                    return
+                }
             }
+
+            // User is moving — give full navigation voice
+            locationManager.speakDirection()
+            // Also announce environment
+            locationManager.announceEnvironment(
+                tactilePaving: navigationModel.tactilePavingDetected,
+                stairs: navigationModel.stairsDetected,
+                stairCount: navigationModel.stairCount
+            )
         }
     }
 
@@ -967,6 +1000,8 @@ struct RouteNavigationView: View {
     // MARK: - Navigation Functions
     private func startNavigation() {
         isNavigating = true
+        hasStartedMoving = false
+        initialLocation = locationManager.userLocation
         // Start camera session after a short delay to let the view settle
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             cameraManager.startSession()
@@ -975,8 +1010,8 @@ struct RouteNavigationView: View {
         // Connect timers only when navigating
         detectionTimerCancellable = detectionTimer.connect()
         voiceTimerCancellable = voiceTimer.connect()
-        // Announce navigation start with phone angle guidance
-        locationManager.speak("Navigation started. Hold your phone slightly tilted forward, about chest height, so the camera sees the path ahead. \(locationManager.currentInstruction)", force: true)
+        // Announce navigation start — tell user to hold phone and start walking
+        navigationModel.speak("Route ready. Hold your phone at chest height, slightly tilted forward. Start walking to begin navigation.", priority: 3)
     }
 
     private func endNavigation() {
@@ -989,6 +1024,8 @@ struct RouteNavigationView: View {
         navigationModel.endNavigation()
         locationManager.clearRoute()
         isNavigating = false
+        hasStartedMoving = false
+        initialLocation = nil
     }
 
     private func processFrame() {

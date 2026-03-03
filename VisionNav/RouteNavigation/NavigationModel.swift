@@ -1182,8 +1182,9 @@ class NavigationModel: NSObject, ObservableObject {
         return n
     }
 
-    // MARK: - Speech (priority-aware, connected to Settings)
+    // MARK: - Speech (priority-aware, connected to Settings, clarity-optimized)
     /// Priority levels: 1=info, 2=warning, 3=danger, 4=critical, 5=emergency (STOP)
+    /// Speech rate is intentionally slow for blind users who rely on hearing every word.
     func speak(_ text: String, priority: Int = 1) {
         guard speechEnabled else { return }
 
@@ -1195,7 +1196,7 @@ class NavigationModel: NSObject, ObservableObject {
             guard !speechSynthesizer.isSpeaking else { return }
         }
 
-        // Priority 3: can interrupt if cooldown expired, but still respects a shorter gap
+        // Priority 3: can interrupt at word boundary
         if priority == 3 {
             if speechSynthesizer.isSpeaking {
                 speechSynthesizer.stopSpeaking(at: .word)
@@ -1213,14 +1214,36 @@ class NavigationModel: NSObject, ObservableObject {
         let settingsVolume = Float(UserDefaults.standard.double(forKey: "voiceVolume"))
         let settingsRate = Float(UserDefaults.standard.double(forKey: "speechRate"))
         let volume = settingsVolume > 0.01 ? settingsVolume : 1.0
-        // Map settings rate (0-1 slider) to AVSpeechUtterance rate (0.3-0.6 range)
-        let baseRate: Float = settingsRate > 0.01 ? (0.35 + settingsRate * 0.25) : 0.48
 
-        let u = AVSpeechUtterance(string: text)
-        u.rate = priority >= 4 ? min(baseRate + 0.08, 0.6) : baseRate
+        // Map settings rate (0-1 slider) to AVSpeechUtterance rate
+        // Range: 0.28 (very slow) to 0.48 (moderate) — optimized for accessibility
+        // Default (no settings): 0.38 (clear and steady)
+        let baseRate: Float = settingsRate > 0.01 ? (0.28 + settingsRate * 0.20) : 0.38
+
+        // Add brief pauses (commas) for multi-clause sentences to aid comprehension
+        let spokenText = addSpeechPauses(text)
+
+        let u = AVSpeechUtterance(string: spokenText)
+        u.rate = priority >= 4 ? min(baseRate + 0.06, 0.50) : baseRate
         u.volume = volume
         u.pitchMultiplier = priority >= 4 ? 1.15 : 1.0
+        u.preUtteranceDelay = 0.05  // Tiny pause before speaking for clarity
+        u.postUtteranceDelay = 0.1  // Brief pause after for natural rhythm
         speechSynthesizer.speak(u)
+    }
+
+    /// Insert natural pauses into speech text for better comprehension.
+    /// Adds commas before directional instructions and between compound clauses.
+    private func addSpeechPauses(_ text: String) -> String {
+        var result = text
+        // Add pause before "move" directives for emphasis
+        result = result.replacingOccurrences(of: " move ", with: ", move ")
+        // Add pause before distance callouts
+        result = result.replacingOccurrences(of: " at ", with: ", at ")
+        // Avoid double commas
+        result = result.replacingOccurrences(of: ",, ", with: ", ")
+        result = result.replacingOccurrences(of: ", , ", with: ", ")
+        return result
     }
 
     func stopSpeaking() { speechSynthesizer.stopSpeaking(at: .immediate) }
