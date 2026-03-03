@@ -55,10 +55,11 @@ public enum ProximityLevel: Int, Comparable {
 
 // MARK: - FOV Box Configuration
 public struct FOVBoxConfig {
-    var widthRatio: CGFloat = 0.5   // 0.2 to 0.8 of screen width
-    var heightRatio: CGFloat = 0.6  // 0.2 to 0.8 of screen height
+    var widthRatio: CGFloat = 0.35  // Narrower: sized for human passage (~shoulder width)
+    var heightRatio: CGFloat = 0.7  // Taller: captures full walking path
     var centerXOffset: CGFloat = 0  // -0.3 to 0.3
     var centerYOffset: CGFloat = 0  // -0.3 to 0.3
+    var sideMarginRatio: CGFloat = 0.12 // Extra margin on each side for incoming obstacle alerts
 
     var minWidth: CGFloat { 0.2 }
     var maxWidth: CGFloat { 0.8 }
@@ -379,9 +380,10 @@ class NavigationCameraManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Three-Zone Depth Analysis within FOV Box
-    /// Divides FOV into left/center/right thirds and computes nearest obstacle per zone.
-    /// Provides spatial obstacle data for directional avoidance guidance.
+    // MARK: - Three-Zone Depth Analysis with Side Margins
+    /// Divides the analysis area into left-margin / center-passage / right-margin zones.
+    /// The center zone matches the FOV box (human passage width).
+    /// Left/right margin zones extend beyond the FOV box to detect incoming obstacles.
     private func analyzeDepthInFOVBox(_ depthData: ARDepthData) {
         let depthMap = depthData.depthMap
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
@@ -393,15 +395,17 @@ class NavigationCameraManager: NSObject, ObservableObject {
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
 
         let fovBox = fovBoxNormalized
-        let startX = Int(fovBox.minX * CGFloat(width))
-        let endX = Int(fovBox.maxX * CGFloat(width))
+        let margin = fovConfig.sideMarginRatio
+
+        // Center zone = FOV box (human passage area)
+        let centerStartX = Int(fovBox.minX * CGFloat(width))
+        let centerEndX = Int(fovBox.maxX * CGFloat(width))
         let startY = Int(fovBox.minY * CGFloat(height))
         let endY = Int(fovBox.maxY * CGFloat(height))
 
-        // Define left/center/right zone boundaries
-        let fovWidth = endX - startX
-        let leftEndX = startX + fovWidth / 3
-        let rightStartX = startX + (2 * fovWidth) / 3
+        // Extended bounds: left/right margins for incoming obstacle detection
+        let extStartX = max(0, Int((fovBox.minX - margin) * CGFloat(width)))
+        let extEndX = min(width, Int((fovBox.maxX + margin) * CGFloat(width)))
 
         var minDistLeft: Float = 999, minDistCenter: Float = 999, minDistRight: Float = 999
         var totalDepth: Float = 0, validCount: Float = 0
@@ -409,7 +413,7 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
         let stepSize = 3
         for y in stride(from: startY, to: endY, by: stepSize) {
-            for x in stride(from: startX, to: endX, by: stepSize) {
+            for x in stride(from: extStartX, to: extEndX, by: stepSize) {
                 guard x >= 0, x < width, y >= 0, y < height else { continue }
                 let ptr = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
                 let depth = ptr[x]
@@ -417,38 +421,47 @@ class NavigationCameraManager: NSObject, ObservableObject {
                 if depth.isFinite && depth > 0.1 && depth < 6.0 {
                     totalDepth += depth
                     validCount += 1
-                    overallMin = min(overallMin, depth)
 
-                    // Classify into left/center/right zones
-                    if x < leftEndX {
+                    // Classify: left margin / center passage / right margin
+                    if x < centerStartX {
+                        // Left margin zone — incoming obstacles from left
                         minDistLeft = min(minDistLeft, depth)
-                    } else if x >= rightStartX {
+                    } else if x >= centerEndX {
+                        // Right margin zone — incoming obstacles from right
                         minDistRight = min(minDistRight, depth)
                     } else {
+                        // Center zone — direct path obstacles
                         minDistCenter = min(minDistCenter, depth)
+                        overallMin = min(overallMin, depth)
                     }
                 }
             }
         }
 
+        // Overall minimum considers center (passage) zone primarily,
+        // but also triggers if side obstacles are very close
+        let sideMin = min(minDistLeft, minDistRight)
+        if sideMin < 1.5 { overallMin = min(overallMin, sideMin) }
+
         let avgDepth = validCount > 0 ? totalDepth / validCount : 999
 
-        // Determine obstacle state
+        // Determine obstacle state based on center passage zone
         let warningThreshold: Float = 3.0
-        let hasObstacle = overallMin < warningThreshold
-        let isPathClear = overallMin >= warningThreshold
+        let hasObstacle = overallMin < warningThreshold || sideMin < 2.0
+        let isPathClear = minDistCenter >= warningThreshold && sideMin >= 2.5
 
-        // Determine which zone has the nearest obstacle
-        let zoneMin = min(minDistLeft, min(minDistCenter, minDistRight))
+        // Determine primary obstacle direction
         let direction: String
-        if zoneMin >= warningThreshold {
-            direction = "none"
-        } else if zoneMin == minDistCenter {
+        if minDistCenter < warningThreshold && minDistCenter <= sideMin {
             direction = "center"
-        } else if zoneMin == minDistLeft {
+        } else if minDistLeft < 2.0 && minDistLeft < minDistRight {
             direction = "left"
-        } else {
+        } else if minDistRight < 2.0 && minDistRight < minDistLeft {
             direction = "right"
+        } else if minDistCenter < warningThreshold {
+            direction = "center"
+        } else {
+            direction = "none"
         }
 
         DispatchQueue.main.async {

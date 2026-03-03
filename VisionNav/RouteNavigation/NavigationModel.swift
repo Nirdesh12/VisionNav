@@ -134,6 +134,23 @@ class NavigationModel: NSObject, ObservableObject {
     var stairDirectionProvider: ((CGRect, ARDepthData?) -> StairDirection)?
     var onDistanceUpdate: ((Float) -> Void)?
 
+    // COCO 80 class names + extended custom classes for navigation assistance
+    // Indices 0-79 = standard COCO, 80+ = custom-trained classes (adjust to match your model)
+    private let classNames: [String] = [
+        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+        "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+        "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+        "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+        "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+        "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+        "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
+        "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+        "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+        // Extended custom classes (indices 80+) — adjust order to match your custom-trained model
+        "tactile_paving", "stairs", "crosswalk", "zebra_crossing", "staircase", "steps"
+    ]
+
     override init() {
         super.init()
         setupSpeech()
@@ -227,7 +244,7 @@ class NavigationModel: NSObject, ObservableObject {
             return
         }
 
-        // Process recognized object observations (bounding boxes + optional masks)
+        // Try standard VNRecognizedObjectObservation first (for object detector pipeline models)
         for result in results.prefix(25) {
             if let obs = result as? VNRecognizedObjectObservation {
                 guard let label = obs.labels.first, label.confidence >= confidenceThreshold else { continue }
@@ -248,19 +265,14 @@ class NavigationModel: NSObject, ObservableObject {
 
                 allResults.append(detection)
 
-                // Track tactile paving
                 if name.contains("tactile") || name.contains("paving") {
                     foundTactilePaving = true
                     tactileBox = obs.boundingBox
                 }
-
-                // Track stairs
                 if name.contains("stair") || name.contains("steps") {
                     foundStairs = true
                     stairsBBox = obs.boundingBox
                 }
-
-                // Check if detection is within FOV box
                 if isWithinFOV(obs.boundingBox) {
                     fovResults.append(detection)
                     if let d = dist, d < minDist { minDist = d }
@@ -268,18 +280,63 @@ class NavigationModel: NSObject, ObservableObject {
             }
         }
 
-        // Also handle raw feature observations for segmentation masks (throttled)
-        let now = Date()
-        if now.timeIntervalSince(lastSegmentationRenderTime) >= segmentationRenderInterval {
-            for result in results {
-                if let featureObs = result as? VNCoreMLFeatureValueObservation {
-                    if let multiArray = featureObs.featureValue.multiArrayValue {
+        // If no VNRecognizedObjectObservation found, parse raw YOLO tensor output
+        // (mlProgram models output raw MLMultiArray tensors, not recognized objects)
+        if allResults.isEmpty {
+            let parsed = parseRawYOLODetections(from: results)
+            for detection in parsed.detections {
+                let name = detection.label.lowercased()
+                allResults.append(detection)
+
+                if name.contains("tactile") || name.contains("paving") {
+                    foundTactilePaving = true
+                    tactileBox = detection.boundingBox
+                }
+                if name.contains("stair") || name.contains("steps") {
+                    foundStairs = true
+                    stairsBBox = detection.boundingBox
+                }
+                if isWithinFOV(detection.boundingBox) {
+                    fovResults.append(detection)
+                    if let d = detection.distance, d < minDist { minDist = d }
+                }
+            }
+
+            // Render segmentation overlay from mask prototypes (seg model only, throttled)
+            if let prototypes = parsed.maskPrototypes, let detTensor = parsed.detectionTensor {
+                let now = Date()
+                if now.timeIntervalSince(lastSegmentationRenderTime) >= segmentationRenderInterval {
+                    lastSegmentationRenderTime = now
+                    let overlayImage = renderInstanceSegmentation(
+                        detectionTensor: detTensor,
+                        prototypes: prototypes,
+                        inputSize: 640.0
+                    )
+                    DispatchQueue.main.async {
+                        self.segmentationOverlayImage = overlayImage
+                    }
+                }
+            }
+        } else {
+            // Standard path: handle segmentation masks from VNCoreMLFeatureValueObservation (throttled)
+            let now = Date()
+            if now.timeIntervalSince(lastSegmentationRenderTime) >= segmentationRenderInterval {
+                for result in results {
+                    if let featureObs = result as? VNCoreMLFeatureValueObservation,
+                       let multiArray = featureObs.featureValue.multiArrayValue {
+                        let shape = multiArray.shape.map { $0.intValue }
+                        // Only render spatial masks (height/width > 50), skip detection tensors
+                        guard shape.count >= 2 else { continue }
+                        let h = shape.count >= 3 ? shape[shape.count - 2] : shape[0]
+                        let w = shape[shape.count - 1]
+                        guard h > 50 && w > 50 else { continue }
+
                         lastSegmentationRenderTime = now
                         let overlayImage = renderSegmentationMask(multiArray)
                         DispatchQueue.main.async {
                             self.segmentationOverlayImage = overlayImage
                         }
-                        break  // Only render one mask per cycle
+                        break
                     }
                 }
             }
@@ -322,6 +379,164 @@ class NavigationModel: NSObject, ObservableObject {
             self.nearestDistance = minDist
             self.onDistanceUpdate?(minDist)
         }
+    }
+
+    // MARK: - Parse Raw YOLO Tensor Output
+    /// Parses raw MLMultiArray output from YOLO mlProgram models (post-NMS format).
+    /// Detection tensor: [1, N, 6] or [1, N, 38] where each detection = [x1, y1, x2, y2, conf, class_id, ...mask_coeffs]
+    /// Mask prototypes (seg model only): [1, 32, H, W]
+    private func parseRawYOLODetections(from results: [VNObservation]) -> (detections: [NavigationDetection], maskPrototypes: MLMultiArray?, detectionTensor: MLMultiArray?) {
+        var detectionArray: MLMultiArray?
+        var maskPrototypes: MLMultiArray?
+
+        for result in results {
+            guard let featureObs = result as? VNCoreMLFeatureValueObservation,
+                  let multiArray = featureObs.featureValue.multiArrayValue else { continue }
+
+            let shape = multiArray.shape.map { $0.intValue }
+
+            if shape.count == 3 && shape[1] <= 500 && shape[2] >= 6 {
+                // Detection tensor: [1, N, 6+] — post-NMS detections
+                detectionArray = multiArray
+            } else if shape.count == 4 && shape[1] == 32 && shape[2] > 50 {
+                // Segmentation mask prototypes: [1, 32, H, W]
+                maskPrototypes = multiArray
+            }
+        }
+
+        guard let detArray = detectionArray else { return ([], nil, nil) }
+
+        let shape = detArray.shape.map { $0.intValue }
+        let numDetections = shape[1]
+        let fieldsPerDetection = shape[2]
+
+        let pointer = detArray.dataPointer.bindMemory(to: Float32.self, capacity: detArray.count)
+
+        var detections: [NavigationDetection] = []
+        let inputSize: CGFloat = 640.0
+
+        for i in 0..<numDetections {
+            let base = i * fieldsPerDetection
+            let x1 = CGFloat(pointer[base + 0])
+            let y1 = CGFloat(pointer[base + 1])
+            let x2 = CGFloat(pointer[base + 2])
+            let y2 = CGFloat(pointer[base + 3])
+            let confidence = pointer[base + 4]
+            let classId = Int(pointer[base + 5])
+
+            // Skip low-confidence detections (includes zero-padded NMS slots)
+            guard confidence >= confidenceThreshold else { continue }
+            guard x2 > x1, y2 > y1 else { continue }  // Valid box
+            guard classId >= 0 else { continue }
+
+            // Convert from pixel coordinates (0-640, top-left origin) to
+            // Vision normalized coordinates (0-1, bottom-left origin, y-up)
+            let normX = x1 / inputSize
+            let normY = 1.0 - (y2 / inputSize)  // Flip y: YOLO y2 (bottom) → Vision origin
+            let normW = (x2 - x1) / inputSize
+            let normH = (y2 - y1) / inputSize
+
+            let box = CGRect(x: normX, y: normY, width: normW, height: normH)
+
+            // Map class ID to name
+            let name: String
+            if classId < classNames.count {
+                name = classNames[classId]
+            } else {
+                name = "object_\(classId)"
+            }
+
+            let isObstacle = NavigationDetection.obstacleClasses.contains(name)
+            let isGuidance = NavigationDetection.guidanceClasses.contains(name)
+            let dist = getDepth(at: box)
+
+            let detection = NavigationDetection(
+                label: name,
+                confidence: confidence,
+                boundingBox: box,
+                isObstacle: isObstacle,
+                isGuidance: isGuidance,
+                distance: dist,
+                segmentationMask: nil
+            )
+
+            detections.append(detection)
+        }
+
+        return (detections, maskPrototypes, detectionArray)
+    }
+
+    // MARK: - Render Instance Segmentation from Prototypes + Coefficients
+    /// Computes per-instance masks: mask_i = sigmoid(sum(coeff_k * prototype_k)), cropped to bbox
+    private func renderInstanceSegmentation(detectionTensor: MLMultiArray, prototypes: MLMultiArray, inputSize: CGFloat) -> UIImage? {
+        let detShape = detectionTensor.shape.map { $0.intValue }
+        let protoShape = prototypes.shape.map { $0.intValue }
+
+        guard detShape.count == 3, detShape[2] > 6 else { return nil } // Need mask coefficients
+        guard protoShape.count == 4, protoShape[1] == 32 else { return nil }
+
+        let numDets = detShape[1]
+        let fieldsPerDet = detShape[2]
+        let numProtos = protoShape[1]
+        let maskH = protoShape[2]
+        let maskW = protoShape[3]
+
+        guard maskW > 0, maskH > 0 else { return nil }
+
+        let detPtr = detectionTensor.dataPointer.bindMemory(to: Float32.self, capacity: detectionTensor.count)
+        let protoPtr = prototypes.dataPointer.bindMemory(to: Float32.self, capacity: prototypes.count)
+
+        var pixels = [UInt8](repeating: 0, count: maskW * maskH * 4)
+
+        for i in 0..<numDets {
+            let base = i * fieldsPerDet
+            let conf = detPtr[base + 4]
+            guard conf >= confidenceThreshold else { continue }
+            let classId = Int(detPtr[base + 5])
+
+            // Bounding box in mask space
+            let bx1 = max(0, Int(CGFloat(detPtr[base + 0]) / inputSize * CGFloat(maskW)))
+            let by1 = max(0, Int(CGFloat(detPtr[base + 1]) / inputSize * CGFloat(maskH)))
+            let bx2 = min(maskW, Int(CGFloat(detPtr[base + 2]) / inputSize * CGFloat(maskW)))
+            let by2 = min(maskH, Int(CGFloat(detPtr[base + 3]) / inputSize * CGFloat(maskH)))
+
+            guard bx2 > bx1, by2 > by1 else { continue }
+
+            // Extract 32 mask coefficients
+            let coeffs = (0..<min(numProtos, fieldsPerDet - 6)).map { detPtr[base + 6 + $0] }
+
+            // Compute mask within bounding box: sigmoid(sum(coeff_k * prototype_k[y][x]))
+            for y in by1..<by2 {
+                for x in bx1..<bx2 {
+                    var sum: Float = 0
+                    for k in 0..<coeffs.count {
+                        let protoIdx = k * maskH * maskW + y * maskW + x
+                        guard protoIdx < prototypes.count else { continue }
+                        sum += coeffs[k] * protoPtr[protoIdx]
+                    }
+                    let maskVal = 1.0 / (1.0 + exp(-sum))
+                    if maskVal > 0.5 {
+                        let pixIdx = (y * maskW + x) * 4
+                        guard pixIdx + 3 < pixels.count else { continue }
+                        colorForSegmentationClass(classId < 80 ? (classId % 20) + 1 : classId - 76, pixels: &pixels, at: pixIdx)
+                    }
+                }
+            }
+        }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: &pixels,
+            width: maskW,
+            height: maskH,
+            bitsPerComponent: 8,
+            bytesPerRow: maskW * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        guard let cgImage = context.makeImage() else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 
     // MARK: - Render Segmentation Mask from MLMultiArray

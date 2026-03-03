@@ -337,26 +337,44 @@ struct RouteNavigationView: View {
     private func fovBoxOverlay(geometry: GeometryProxy, cameraHeight: CGFloat) -> some View {
         let fovRect = cameraManager.fovBoxNormalized
         let cameraWidth = geometry.size.width
+        let margin = cameraManager.fovConfig.sideMarginRatio
 
         let boxX = fovRect.minX * cameraWidth
         let boxY = fovRect.minY * cameraHeight
         let boxWidth = fovRect.width * cameraWidth
         let boxHeight = fovRect.height * cameraHeight
 
+        // Side margin zones (incoming obstacle detection areas)
+        let marginWidth = margin * cameraWidth
+        let leftMarginX = max(0, boxX - marginWidth)
+        let rightMarginX = boxX + boxWidth
+
         return ZStack {
-            // Dimmed area outside FOV
+            // Dimmed area outside FOV + margins
             Color.black.opacity(0.3)
                 .mask(
                     Rectangle()
                         .overlay(
                             Rectangle()
-                                .frame(width: boxWidth, height: boxHeight)
+                                .frame(width: boxWidth + marginWidth * 2, height: boxHeight)
                                 .position(x: boxX + boxWidth/2, y: boxY + boxHeight/2)
                                 .blendMode(.destinationOut)
                         )
                 )
 
-            // FOV Box border with proximity color
+            // Left margin zone — subtle dashed border
+            Rectangle()
+                .stroke(Color.yellow.opacity(0.4), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                .frame(width: marginWidth, height: boxHeight)
+                .position(x: leftMarginX + marginWidth/2, y: boxY + boxHeight/2)
+
+            // Right margin zone — subtle dashed border
+            Rectangle()
+                .stroke(Color.yellow.opacity(0.4), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                .frame(width: marginWidth, height: boxHeight)
+                .position(x: rightMarginX + marginWidth/2, y: boxY + boxHeight/2)
+
+            // FOV Box border — main passage area with proximity color
             Rectangle()
                 .stroke(fovBorderColor, lineWidth: 3)
                 .frame(width: boxWidth, height: boxHeight)
