@@ -126,20 +126,22 @@ class NavigationModel: NSObject, ObservableObject {
     private let bandStabilityRequired: Int = 3       // require 3 frames before band change triggers speech
 
     // ── Global speech gate ──────────────────────────────────
-    // Prevents ALL non-emergency speech within this window after any utterance
     private var lastSpokeTime: Date = .distantPast
-    private let globalSpeechGap: TimeInterval = 2.5
+    private let globalSpeechGap: TimeInterval = 1.8  // minimum gap between non-emergency speech
 
-    // ── Per-category cooldowns (tuned to reduce chatter) ───
-    private let emergencyCooldown: TimeInterval = 2.0
-    private let dangerCooldown: TimeInterval = 3.0
-    private let warningCooldown: TimeInterval = 5.0
-    private let fovAlertCooldown: TimeInterval = 5.0
-    private let pathClearCooldown: TimeInterval = 20.0
-    private let stairCooldown: TimeInterval = 5.0
-    private let dropOffCooldown: TimeInterval = 4.0
+    // ── Per-category cooldowns ──────────────────────────────
+    private let emergencyCooldown: TimeInterval = 1.5
+    private let dangerCooldown: TimeInterval = 2.5
+    private let warningCooldown: TimeInterval = 4.0
+    private let fovAlertCooldown: TimeInterval = 4.0
+    private let pathClearCooldown: TimeInterval = 15.0
+    private let stairCooldown: TimeInterval = 4.0
+    private let dropOffCooldown: TimeInterval = 3.0
     private var lastEmergencyAlertTime: Date = .distantPast
     private var lastDropOffAlertTime: Date = .distantPast
+
+    // Device pitch — used to suppress ground-plane false obstacle alerts
+    var devicePitch: Float = 0  // radians, set from ARFrame.camera.eulerAngles.x
 
     // Tactile temporal filtering
     private let tactileConfidenceThreshold: Float = 0.55
@@ -884,24 +886,24 @@ class NavigationModel: NSObject, ObservableObject {
     }
 
     // MARK: - Alert System (YOLO-labeled object alerts)
-    /// Only fires for YOLO-detected objects that have a label name — suppressed when the
-    /// LiDAR FOV handler already covers the same distance range to avoid double-speaking.
+    /// Fires for YOLO-detected obstacles with specific labels. Provides richer info than
+    /// the generic LiDAR FOV handler (which only says "obstacle").
     private func checkAlert(_ detections: [NavigationDetection]) {
         let now = Date()
-        guard now.timeIntervalSince(lastAlertTime) > 4.0 else { return }
-
-        // Suppress when LiDAR FOV handler recently spoke (they cover the same obstacle)
-        guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 3.0 else { return }
+        guard now.timeIntervalSince(lastAlertTime) > 3.0 else { return }
 
         let obs = detections.filter { $0.isObstacle && $0.distance != nil }
         guard let nearest = obs.first, let dist = nearest.distance else { return }
 
-        // Only announce labeled objects at close range — farther objects use LiDAR FOV handler
         var alert: NavigationAlert?
         if dist < 0.5 {
-            alert = NavigationAlert(message: "\(nearest.label) extremely close!", alertType: .danger, priority: 4)
-        } else if dist < 1.5 {
-            alert = NavigationAlert(message: "\(nearest.label) \(String(format: "%.1f", dist)) meters", alertType: .warning, priority: 2)
+            alert = NavigationAlert(message: "\(nearest.label) very close!", alertType: .danger, priority: 4)
+        } else if dist < 1.0 {
+            alert = NavigationAlert(message: "\(nearest.label) close, \(String(format: "%.1f", dist)) meters", alertType: .danger, priority: 3)
+        } else if dist < 2.0 {
+            alert = NavigationAlert(message: "\(nearest.label) \(String(format: "%.1f", dist)) meters ahead", alertType: .warning, priority: 2)
+        } else if dist < 3.0 {
+            alert = NavigationAlert(message: "\(nearest.label) ahead", alertType: .info, priority: 1)
         }
 
         if let a = alert {
@@ -925,12 +927,18 @@ class NavigationModel: NSObject, ObservableObject {
         centerZoneDistance: Float,
         rightZoneDistance: Float,
         routeBearing: Double?,
-        userHeading: Double?
+        userHeading: Double?,
+        phonePointingAtGround: Bool = false
     ) {
         let now = Date()
 
         // Don't overlap with stair alerts
         if stairsDetected { return }
+
+        // Suppress obstacle alerts when phone is pointing at the ground (~60°+ downward)
+        // The ground surface itself reads as a close "obstacle" — this is a false positive.
+        // Allow ONLY emergency STOP (< 0.3m) through, since even ground-facing can have real obstacles.
+        if phonePointingAtGround && nearestDistance > 0.3 { return }
 
         // === EMERGENCY STOP: < 0.3m ===
         if nearestDistance < 0.3 && nearestDistance > 0.05 {
@@ -1148,30 +1156,43 @@ class NavigationModel: NSObject, ObservableObject {
         return n
     }
 
-    // MARK: - Speech (priority-aware with global cooldown)
+    // MARK: - Speech (priority-aware, connected to Settings)
     /// Priority levels: 1=info, 2=warning, 3=danger, 4=critical, 5=emergency (STOP)
-    /// Non-emergency speech respects a global gap so alerts don't overlap / become annoying.
     func speak(_ text: String, priority: Int = 1) {
         guard speechEnabled else { return }
 
         let now = Date()
 
-        // Priority < 4: enforce global speech gap to prevent chatter
-        if priority < 4 {
+        // Priority 1-2: respect global speech gap to prevent low-priority chatter
+        if priority <= 2 {
             guard now.timeIntervalSince(lastSpokeTime) > globalSpeechGap else { return }
             guard !speechSynthesizer.isSpeaking else { return }
         }
 
-        // Priority 4-5: interrupt current speech for safety-critical messages
+        // Priority 3: can interrupt if cooldown expired, but still respects a shorter gap
+        if priority == 3 {
+            if speechSynthesizer.isSpeaking {
+                speechSynthesizer.stopSpeaking(at: .word)
+            }
+        }
+
+        // Priority 4-5: always interrupt immediately (safety-critical)
         if priority >= 4 && speechSynthesizer.isSpeaking {
             speechSynthesizer.stopSpeaking(at: .immediate)
         }
 
         lastSpokeTime = now
 
+        // Read volume and speech rate from Settings (persisted in UserDefaults)
+        let settingsVolume = Float(UserDefaults.standard.double(forKey: "voiceVolume"))
+        let settingsRate = Float(UserDefaults.standard.double(forKey: "speechRate"))
+        let volume = settingsVolume > 0.01 ? settingsVolume : 1.0
+        // Map settings rate (0-1 slider) to AVSpeechUtterance rate (0.3-0.6 range)
+        let baseRate: Float = settingsRate > 0.01 ? (0.35 + settingsRate * 0.25) : 0.48
+
         let u = AVSpeechUtterance(string: text)
-        u.rate = priority >= 4 ? 0.55 : 0.48
-        u.volume = 1.0
+        u.rate = priority >= 4 ? min(baseRate + 0.08, 0.6) : baseRate
+        u.volume = volume
         u.pitchMultiplier = priority >= 4 ? 1.15 : 1.0
         speechSynthesizer.speak(u)
     }

@@ -29,6 +29,9 @@ struct RouteNavigationView: View {
     @State private var fovScale: CGFloat = 1.0
     @State private var lastFOVScale: CGFloat = 1.0
 
+    // Tilt guidance state
+    @State private var lastTiltWarningTime: Date = .distantPast
+
     // Timers — only connect when navigating to avoid wasting main thread cycles
     @State private var detectionTimer: Timer.TimerPublisher = Timer.publish(every: 0.25, on: .main, in: .common)
     @State private var voiceTimer: Timer.TimerPublisher = Timer.publish(every: 12.0, on: .main, in: .common)
@@ -665,8 +668,22 @@ struct RouteNavigationView: View {
                 .accessibilityLabel(navigationModel.stairCount > 0 ? "\(navigationModel.stairCount) steps ahead" : "Stairs detected ahead")
             }
 
+            // Phone tilt warning — shown when camera is pointing at ground
+            if cameraManager.isPhonePointingAtGround && isNavigating {
+                HStack {
+                    Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                    Text("Tilt phone up — camera is facing the ground")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                }
+                .foregroundColor(.white)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.purple.opacity(0.9)))
+                .accessibilityLabel("Please tilt your phone upward, the camera is currently facing the ground")
+            }
+
             // Path clear indicator
-            if cameraManager.pathClear && isNavigating && !navigationModel.stairsDetected {
+            if cameraManager.pathClear && isNavigating && !navigationModel.stairsDetected && !cameraManager.isPhonePointingAtGround {
                 HStack {
                     Image(systemName: "checkmark.shield.fill")
                     Text("Path clear").font(.caption.weight(.semibold))
@@ -958,7 +975,8 @@ struct RouteNavigationView: View {
         // Connect timers only when navigating
         detectionTimerCancellable = detectionTimer.connect()
         voiceTimerCancellable = voiceTimer.connect()
-        locationManager.speak("Navigation started. \(locationManager.currentInstruction)", force: true)
+        // Announce navigation start with phone angle guidance
+        locationManager.speak("Navigation started. Hold your phone slightly tilted forward, about chest height, so the camera sees the path ahead. \(locationManager.currentInstruction)", force: true)
     }
 
     private func endNavigation() {
@@ -983,6 +1001,9 @@ struct RouteNavigationView: View {
             fovBox: cameraManager.fovBoxNormalized
         )
 
+        // Pass device pitch to navigation model for ground-plane filtering
+        navigationModel.devicePitch = cameraManager.devicePitch
+
         // LiDAR-based FOV obstacle avoidance (runs independently of YOLO)
         navigationModel.handleFOVObstacleAvoidance(
             obstacleInFOV: cameraManager.obstacleInFOV,
@@ -993,7 +1014,8 @@ struct RouteNavigationView: View {
             centerZoneDistance: cameraManager.centerZoneDistance,
             rightZoneDistance: cameraManager.rightZoneDistance,
             routeBearing: locationManager.isRouteCalculated ? locationManager.currentRouteBearing : nil,
-            userHeading: locationManager.isRouteCalculated ? locationManager.userHeading : nil
+            userHeading: locationManager.isRouteCalculated ? locationManager.userHeading : nil,
+            phonePointingAtGround: cameraManager.isPhonePointingAtGround
         )
 
         // LiDAR-only stair detection (safety fallback when YOLO misses stairs)
@@ -1009,6 +1031,15 @@ struct RouteNavigationView: View {
             detected: cameraManager.dropOffDetected,
             dropDepth: cameraManager.dropOffDepth
         )
+
+        // Voice reminder when phone is pointing at ground for too long (every 10s)
+        if cameraManager.isPhonePointingAtGround {
+            let now = Date()
+            if now.timeIntervalSince(lastTiltWarningTime) > 10.0 {
+                lastTiltWarningTime = now
+                navigationModel.speak("Please tilt your phone up so the camera can see the path ahead", priority: 2)
+            }
+        }
     }
 }
 

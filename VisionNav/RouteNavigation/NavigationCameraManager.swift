@@ -104,6 +104,11 @@ class NavigationCameraManager: NSObject, ObservableObject {
     @Published var dropOffDetected: Bool = false
     @Published var dropOffDepth: Float = 0
 
+    // Device pitch angle (radians) — used to detect ground-facing orientation
+    // 0 = horizontal, -π/2 = straight down at ground, π/2 = straight up
+    @Published var devicePitch: Float = 0
+    @Published var isPhonePointingAtGround: Bool = false  // true when pitch > ~60° downward
+
     private var lastLiDARStairTime: TimeInterval = 0
     private let lidarStairInterval: TimeInterval = 0.3  // Check stairs every 300ms
 
@@ -396,6 +401,8 @@ class NavigationCameraManager: NSObject, ObservableObject {
             self.lidarStairDistance = 999
             self.dropOffDetected = false
             self.dropOffDepth = 0
+            self.devicePitch = 0
+            self.isPhonePointingAtGround = false
         }
     }
 
@@ -741,7 +748,14 @@ extension NavigationCameraManager: ARSessionDelegate {
         let buffer = frame.capturedImage
         let depth = frame.smoothedSceneDepth ?? frame.sceneDepth
 
-        // Throttle depth analysis — run at most every 100ms on a background queue
+        // Extract device pitch from camera transform (eulerAngles.x)
+        // In ARKit portrait mode: ~0 = phone upright, large negative = pointing at ground
+        let pitch = frame.camera.eulerAngles.x  // radians
+        // Phone is "pointing at ground" when tilted more than ~55° downward from horizontal
+        // In portrait mode with camera facing away, pitch < -0.95 rad ≈ phone looking at floor
+        let pointingAtGround = pitch < -0.95  // ~55 degrees below horizontal
+
+        // Throttle depth analysis on a background queue
         if let d = depth, !isAnalyzingDepth {
             let now = frame.timestamp
             if now - lastDepthAnalysisTime >= depthAnalysisInterval {
@@ -766,6 +780,8 @@ extension NavigationCameraManager: ARSessionDelegate {
         DispatchQueue.main.async {
             self.currentFrame = buffer
             self.currentDepthData = depth
+            self.devicePitch = pitch
+            self.isPhonePointingAtGround = pointingAtGround
         }
     }
 
