@@ -1188,6 +1188,10 @@ class NavigationModel: NSObject, ObservableObject {
     func speak(_ text: String, priority: Int = 1) {
         guard speechEnabled else { return }
 
+        // Ensure audio session is configured for playback — voice recognition
+        // changes category to .record which silences the speech synthesizer
+        ensurePlaybackAudioSession()
+
         let now = Date()
 
         // Priority 1-2: respect global speech gap to prevent low-priority chatter
@@ -1244,6 +1248,16 @@ class NavigationModel: NSObject, ObservableObject {
         result = result.replacingOccurrences(of: ",, ", with: ", ")
         result = result.replacingOccurrences(of: ", , ", with: ", ")
         return result
+    }
+
+    /// Ensure audio session is in playback mode. Voice recognition sets it to .record
+    /// which silences AVSpeechSynthesizer. This restores playback when needed.
+    private func ensurePlaybackAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        if session.category != .playback {
+            try? session.setCategory(.playback, mode: .voicePrompt, options: [.mixWithOthers, .duckOthers])
+            try? session.setActive(true)
+        }
     }
 
     func stopSpeaking() { speechSynthesizer.stopSpeaking(at: .immediate) }

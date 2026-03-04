@@ -37,6 +37,10 @@ struct RouteNavigationView: View {
     @State private var initialLocation: CLLocationCoordinate2D?
     private let movementThreshold: Double = 5.0 // meters — user must move 5m before nav voice
 
+    // Voice-only search flow — auto-confirm, auto-select, auto-start for blind users
+    @State private var isVoiceSearchActive: Bool = false
+    @State private var shouldAutoStartNavigation: Bool = false
+
     // Timers — only connect when navigating to avoid wasting main thread cycles
     @State private var detectionTimer: Timer.TimerPublisher = Timer.publish(every: 0.25, on: .main, in: .common)
     @State private var voiceTimer: Timer.TimerPublisher = Timer.publish(every: 12.0, on: .main, in: .common)
@@ -87,6 +91,49 @@ struct RouteNavigationView: View {
             }
         }
         .onDisappear { endNavigation() }
+        // Voice-only search: auto-search when voice input auto-confirms after silence
+        .onChange(of: voiceManager.autoConfirmedText) { newText in
+            guard !newText.isEmpty else { return }
+            DispatchQueue.main.async { voiceManager.autoConfirmedText = "" }
+            searchText = newText
+            locationManager.search(query: newText)
+            isVoiceSearchActive = true
+            // Speak what was heard (audio session restored by stopListening)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                navigationModel.speak("Searching for \(newText)", priority: 3)
+            }
+        }
+        // Voice-only search: auto-select top result when results arrive
+        .onChange(of: locationManager.searchResults) { newResults in
+            guard isVoiceSearchActive else { return }
+            isVoiceSearchActive = false
+            if let topResult = newResults.first {
+                showSearch = false
+                locationManager.setDestination(from: topResult)
+                shouldAutoStartNavigation = true
+                let distStr = topResult.distance.map { locationManager.formatDistance($0) } ?? ""
+                let msg = distStr.isEmpty
+                    ? "Going to \(topResult.name). Calculating route."
+                    : "Going to \(topResult.name), \(distStr) away. Calculating route."
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    navigationModel.speak(msg, priority: 3)
+                }
+            } else {
+                navigationModel.speak("No results found. Please try again.", priority: 3)
+            }
+        }
+        // Voice-only search: auto-start navigation when route is ready
+        .onChange(of: locationManager.isRouteCalculated) { calculated in
+            if calculated && shouldAutoStartNavigation && !isNavigating {
+                shouldAutoStartNavigation = false
+                // Delay to let route announcement speech finish
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    if locationManager.isRouteCalculated && !isNavigating {
+                        startNavigation()
+                    }
+                }
+            }
+        }
         .onReceive(detectionTimer) { _ in
             if isNavigating { processFrame() }
         }
@@ -1026,6 +1073,7 @@ struct RouteNavigationView: View {
         isNavigating = false
         hasStartedMoving = false
         initialLocation = nil
+        shouldAutoStartNavigation = false
     }
 
     private func processFrame() {
@@ -1191,11 +1239,16 @@ class VoiceInputManager: ObservableObject {
     @Published var isListening = false
     @Published var recognizedText = ""
     @Published var isAuthorized = false
+    @Published var autoConfirmedText = ""  // Non-empty when voice auto-confirmed after silence
 
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var audioEngine: AVAudioEngine?
+
+    // Auto-confirm after silence timeout (voice-only search for blind users)
+    private var silenceTimer: Timer?
+    private let silenceTimeout: TimeInterval = 2.5
 
     // Common Nepali place names as contextual hints for the recognizer
     private let nepaliPlaceHints: [String] = [
@@ -1251,6 +1304,9 @@ class VoiceInputManager: ObservableObject {
 
     func startListening() {
         recognizedText = ""
+        autoConfirmedText = ""
+        silenceTimer?.invalidate()
+        silenceTimer = nil
         guard isAuthorized, let recognizer = speechRecognizer, recognizer.isAvailable else { return }
         stopListening()
 
@@ -1278,11 +1334,26 @@ class VoiceInputManager: ObservableObject {
         engine.prepare()
         do { try engine.start() } catch { return }
 
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, _ in
+        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             if let result = result {
                 let raw = result.bestTranscription.formattedString
                 let corrected = self?.applyPhoneticCorrections(raw) ?? raw
-                DispatchQueue.main.async { self?.recognizedText = corrected }
+                DispatchQueue.main.async {
+                    self?.recognizedText = corrected
+                    self?.resetSilenceTimer()
+                }
+                if result.isFinal {
+                    DispatchQueue.main.async { self?.performAutoConfirm() }
+                }
+            }
+            if error != nil {
+                DispatchQueue.main.async {
+                    if !(self?.recognizedText.isEmpty ?? true) {
+                        self?.performAutoConfirm()
+                    } else {
+                        self?.stopListening()
+                    }
+                }
             }
         }
 
@@ -1290,6 +1361,8 @@ class VoiceInputManager: ObservableObject {
     }
 
     func stopListening() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine = nil
@@ -1297,8 +1370,41 @@ class VoiceInputManager: ObservableObject {
         recognitionRequest = nil
         recognitionTask?.cancel()
         recognitionTask = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+
+        // Restore audio session to playback mode for speech synthesis
+        // Voice recognition sets it to .record which silences AVSpeechSynthesizer
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+            try session.setCategory(.playback, mode: .voicePrompt, options: [.mixWithOthers, .duckOthers])
+            try session.setActive(true)
+        } catch {
+            print("⚠️ Audio session restore error: \(error)")
+        }
+
         DispatchQueue.main.async { self.isListening = false }
+    }
+
+    // MARK: - Auto-Confirm (voice-only search for blind users)
+
+    private func resetSilenceTimer() {
+        silenceTimer?.invalidate()
+        guard !recognizedText.isEmpty else { return }
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async { self?.performAutoConfirm() }
+        }
+    }
+
+    private func performAutoConfirm() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        guard isListening, !recognizedText.isEmpty else { return }
+        let text = recognizedText
+        stopListening()
+        // Notify view to auto-search (after audio session is restored)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.autoConfirmedText = text
+        }
     }
 
     /// Post-processing: fix common phonetic misrecognitions of Nepali place names
