@@ -7,6 +7,15 @@ import Combine
 import MediaPlayer
 import AVFoundation
 
+// MARK: - Feedback Mode
+
+/// Controls how obstacle proximity is communicated to the user.
+public enum FeedbackMode: String, CaseIterable {
+    case voiceOnly = "Voice Only"
+    case hapticOnly = "Haptic Only"
+    case hapticWithCriticalVoice = "Haptic + Voice"
+}
+
 // MARK: - 0. SYSTEM VOLUME INTEGRATION
 
 /// Protocol for components that handle volume control actions.
@@ -202,6 +211,14 @@ class SettingsManager: ObservableObject, VolumeControl {
         }
     }
 
+    // Feedback Mode
+    @Published var feedbackMode: FeedbackMode {
+        didSet {
+            UserDefaults.standard.set(feedbackMode.rawValue, forKey: "feedbackMode")
+            hapticFeedback()
+        }
+    }
+
     // General Settings
     @Published var notificationsEnabled: Bool {
         didSet {
@@ -219,6 +236,8 @@ class SettingsManager: ObservableObject, VolumeControl {
         self.voiceVolume = UserDefaults.standard.object(forKey: "voiceVolume") as? Double ?? 0.75
         self.speechRate = UserDefaults.standard.object(forKey: "speechRate") as? Double ?? 0.5
         self.notificationsEnabled = UserDefaults.standard.object(forKey: "notificationsEnabled") as? Bool ?? true
+        let savedMode = UserDefaults.standard.string(forKey: "feedbackMode") ?? FeedbackMode.hapticWithCriticalVoice.rawValue
+        self.feedbackMode = FeedbackMode(rawValue: savedMode) ?? .hapticWithCriticalVoice
         
         // Set up physical button synchronization
         setupVolumeSync()

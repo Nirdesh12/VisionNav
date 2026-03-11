@@ -74,6 +74,14 @@ struct RouteNavigationView: View {
             locationManager.requestPermission()
             voiceManager.requestPermission()
             navigationModel.onDistanceUpdate = { [weak cameraManager] distance in
+                // In voiceOnly mode, skip haptics entirely
+                let mode = FeedbackMode(
+                    rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
+                ) ?? .hapticWithCriticalVoice
+                if mode == .voiceOnly {
+                    cameraManager?.stopHaptics()
+                    return
+                }
                 cameraManager?.updateHaptics(forDistance: distance)
             }
             // Wire stair counting from camera manager to navigation model
@@ -1102,6 +1110,50 @@ struct RouteNavigationView: View {
             userHeading: locationManager.isRouteCalculated ? locationManager.userHeading : nil,
             phonePointingAtGround: cameraManager.isPhonePointingAtGround
         )
+
+        // Directional haptic feedback — sharpness encodes obstacle direction.
+        // Merges real-time depth analysis (FOV-based) with spatial map (mesh-based 360° awareness).
+        let feedbackMode = FeedbackMode(
+            rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
+        ) ?? .hapticWithCriticalVoice
+
+        if feedbackMode != .voiceOnly {
+            // Primary: depth-based direction from FOV analysis
+            var direction: HapticDirection
+            var hapticDistance = cameraManager.nearestObstacleDistance
+            switch cameraManager.obstacleDirection {
+            case "left":   direction = .left
+            case "right":  direction = .right
+            case "center": direction = .center
+            default:       direction = .none
+            }
+
+            // Augment with spatial map: if FOV sees nothing but map has nearby obstacles
+            // from outside the camera view (e.g., approaching from behind or side)
+            let map = cameraManager.spatialMap
+            let mapDirection = map.dominantObstacleDirection
+            let mapLeftDist = map.nearestFrontLeft
+            let mapRightDist = map.nearestFrontRight
+            let mapAheadDist = map.nearestAhead
+
+            if direction == .none && mapDirection != .none {
+                // Spatial map detected an obstacle that depth analysis missed
+                direction = mapDirection
+                hapticDistance = min(mapLeftDist, min(mapRightDist, mapAheadDist))
+            } else if direction != .none {
+                // Both sources active — use the closest obstacle from either source
+                let mapNearest = min(mapLeftDist, min(mapRightDist, mapAheadDist))
+                if mapNearest < hapticDistance && mapDirection != .none {
+                    direction = mapDirection
+                    hapticDistance = mapNearest
+                }
+            }
+
+            cameraManager.updateDirectionalHaptics(
+                forDistance: hapticDistance,
+                direction: direction
+            )
+        }
 
         // LiDAR-only stair detection (safety fallback when YOLO misses stairs)
         navigationModel.handleLiDARStairDetection(

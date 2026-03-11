@@ -51,6 +51,41 @@ struct SettingView: View {
                     }
                     .padding(.horizontal, horizontalPadding)
 
+                    // MARK: - FEEDBACK SECTION
+                    SettingsSectionHeader(title: "FEEDBACK")
+                        .padding(.horizontal, horizontalPadding)
+
+                    VStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 14) {
+                                Image(systemName: "hand.tap.fill")
+                                    .font(.title2)
+                                    .foregroundColor(.green)
+                                    .frame(width: 40, height: 40)
+                                    .background(Color.green.opacity(0.1))
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Feedback Mode")
+                                        .font(.headline).fontWeight(.medium)
+                                    Text("How obstacles are communicated")
+                                        .font(.subheadline).foregroundColor(.secondary)
+                                }
+                            }
+
+                            Picker("Feedback Mode", selection: $settingsManager.feedbackMode) {
+                                ForEach(FeedbackMode.allCases, id: \.self) { mode in
+                                    Text(mode.rawValue).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                        .padding(16)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                    }
+                    .padding(.horizontal, horizontalPadding)
+
                     // MARK: - GENERAL SECTION
                     SettingsSectionHeader(title: "GENERAL")
                         .padding(.horizontal, horizontalPadding)

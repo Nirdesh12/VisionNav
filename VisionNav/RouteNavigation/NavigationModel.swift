@@ -935,9 +935,27 @@ class NavigationModel: NSObject, ObservableObject {
 
         if let a = alert {
             lastAlertTime = now
+
+            // Read feedback mode setting
+            let feedbackMode = FeedbackMode(
+                rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
+            ) ?? .hapticWithCriticalVoice
+
             DispatchQueue.main.async {
                 self.currentAlert = a
-                self.speak(a.message, priority: a.priority)
+
+                // Voice gating: in haptic modes, only speak for critical/dangerous objects
+                switch feedbackMode {
+                case .voiceOnly:
+                    self.speak(a.message, priority: a.priority)
+                case .hapticOnly:
+                    break  // Haptics handle all feedback
+                case .hapticWithCriticalVoice:
+                    // Only speak for priority >= 3 (close/dangerous labeled objects)
+                    if a.priority >= 3 {
+                        self.speak(a.message, priority: a.priority)
+                    }
+                }
             }
         }
     }
@@ -945,6 +963,7 @@ class NavigationModel: NSObject, ObservableObject {
     // MARK: - FOV-Based Obstacle Avoidance with Progressive Distance Alerts
     /// Processes continuous LiDAR zone data for directional obstacle warnings, emergency STOP,
     /// progressive distance callouts, and "path clear" guidance.
+    /// Voice is gated by FeedbackMode: in haptic modes, only critical/emergency alerts speak.
     func handleFOVObstacleAvoidance(
         obstacleInFOV: Bool,
         obstacleDirection: String,
@@ -965,6 +984,11 @@ class NavigationModel: NSObject, ObservableObject {
         currentRightZoneDist = rightZoneDistance
         currentObstacleDirection = obstacleDirection
 
+        // Read feedback mode setting
+        let feedbackMode = FeedbackMode(
+            rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
+        ) ?? .hapticWithCriticalVoice
+
         // Don't overlap with stair alerts
         if stairsDetected { return }
 
@@ -981,7 +1005,10 @@ class NavigationModel: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 let alert = NavigationAlert(message: "Stop!", alertType: .danger, priority: 5)
                 self.currentAlert = alert
-                self.speak("Stop!", priority: 5)
+                // Emergency STOP always speaks (except hapticOnly)
+                if feedbackMode != .hapticOnly {
+                    self.speak("Stop!", priority: 5)
+                }
             }
             return
         }
@@ -1051,11 +1078,29 @@ class NavigationModel: NSObject, ObservableObject {
             lastAnnouncedDistanceBand = currentBand
             consecutiveBandFrames = 0
 
+            // Check if path is completely blocked (all zones < 1.5m)
+            let allZonesBlocked = leftZoneDistance < 1.5 && centerZoneDistance < 1.5 && rightZoneDistance < 1.5
+
             DispatchQueue.main.async {
                 let alertType: NavigationAlert.AlertType = nearestDistance < 1.0 ? .danger : .warning
                 let alert = NavigationAlert(message: message, alertType: alertType, priority: priority)
                 self.currentAlert = alert
-                self.speak(message, priority: priority)
+
+                // Voice gating based on feedback mode
+                switch feedbackMode {
+                case .voiceOnly:
+                    self.speak(message, priority: priority)
+                case .hapticOnly:
+                    break  // Directional haptics handle all feedback
+                case .hapticWithCriticalVoice:
+                    // Speak only for critical/emergency situations or blocked path
+                    if priority >= 4 || allZonesBlocked {
+                        let voiceMessage = allZonesBlocked && priority < 4
+                            ? "Path blocked. Turn around or wait."
+                            : message
+                        self.speak(voiceMessage, priority: max(priority, 4))
+                    }
+                }
             }
         } else if pathClear && nearestDistance >= 3.0 {
             guard now.timeIntervalSince(lastPathClearTime) > pathClearCooldown else { return }
@@ -1066,8 +1111,11 @@ class NavigationModel: NSObject, ObservableObject {
             lastAnnouncedDistanceBand = 0
             consecutiveBandFrames = 0
 
-            DispatchQueue.main.async {
-                self.speak("Path clear", priority: 1)
+            // "Path clear" only speaks in voice modes
+            if feedbackMode == .voiceOnly {
+                DispatchQueue.main.async {
+                    self.speak("Path clear", priority: 1)
+                }
             }
         }
     }

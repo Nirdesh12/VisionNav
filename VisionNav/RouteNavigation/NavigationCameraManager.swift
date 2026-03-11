@@ -12,6 +12,178 @@ import UIKit
 import Combine
 import CoreHaptics
 
+// MARK: - Spatial Map (2D Polar Occupancy Grid from ARKit Mesh Reconstruction)
+/// Builds a persistent 2D occupancy grid around the user from ARMeshAnchor data,
+/// similar to how a robotic vacuum maps a room. Tracks obstacle positions in angular
+/// sectors at varying distances, surviving across frames even when obstacles leave the FOV.
+class SpatialMap {
+    /// Number of angular sectors (360° / sectorCount). 12 sectors = 30° each.
+    let sectorCount: Int = 12
+    /// Distance rings in meters from the user. Each ring is 1m wide.
+    let maxDistance: Float = 5.0
+    let ringWidth: Float = 0.5
+    /// Grid: [sector][ring] = minimum obstacle distance within that cell.
+    /// 999 = no obstacle detected. Lower = closer obstacle.
+    private(set) var grid: [[Float]]
+    /// Timestamp of last update per sector (for decay)
+    private var sectorTimestamps: [TimeInterval]
+    /// How quickly old data decays (seconds). After this, unrefreshed cells reset.
+    let decayInterval: TimeInterval = 3.0
+
+    var ringCount: Int { Int(maxDistance / ringWidth) }
+
+    init() {
+        let rings = Int(5.0 / 0.5)  // 10 rings
+        grid = Array(repeating: Array(repeating: Float(999), count: rings), count: 12)
+        sectorTimestamps = Array(repeating: 0, count: 12)
+    }
+
+    /// Clears the entire map.
+    func reset() {
+        let rings = ringCount
+        grid = Array(repeating: Array(repeating: Float(999), count: rings), count: sectorCount)
+        sectorTimestamps = Array(repeating: 0, count: sectorCount)
+    }
+
+    /// Updates the map from an ARMeshAnchor's geometry, projected relative to the user's current position.
+    /// - Parameters:
+    ///   - anchor: The mesh anchor containing 3D vertex data
+    ///   - cameraTransform: The current camera (user) transform from ARFrame
+    ///   - timestamp: Frame timestamp for decay tracking
+    func updateFromMesh(_ anchor: ARMeshAnchor, cameraTransform: simd_float4x4, timestamp: TimeInterval) {
+        let meshTransform = anchor.transform
+        let geometry = anchor.geometry
+        let vertexBuffer = geometry.vertices
+        let vertexCount = vertexBuffer.count
+
+        // User position in world coordinates
+        let userPos = simd_float3(cameraTransform.columns.3.x,
+                                   cameraTransform.columns.3.y,
+                                   cameraTransform.columns.3.z)
+
+        // User forward direction (negative Z in camera space, projected to XZ plane)
+        let forward = simd_float3(-cameraTransform.columns.2.x,
+                                    0,
+                                    -cameraTransform.columns.2.z)
+        let forwardNorm = simd_normalize(forward)
+        // User's yaw angle (heading on XZ plane)
+        let userYaw = atan2(forwardNorm.x, forwardNorm.z)
+
+        // Sample vertices (stride for performance — every 4th vertex)
+        let stride = max(1, vertexCount / 200)
+
+        for i in Swift.stride(from: 0, to: vertexCount, by: stride) {
+            // Read vertex position in mesh-local space
+            let vertexPointer = vertexBuffer.buffer.contents()
+                .advanced(by: vertexBuffer.offset + i * vertexBuffer.stride)
+            let localPos = vertexPointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+
+            // Transform to world space
+            let worldPos4 = meshTransform * simd_float4(localPos.x, localPos.y, localPos.z, 1.0)
+            let worldPos = simd_float3(worldPos4.x, worldPos4.y, worldPos4.z)
+
+            // Vector from user to vertex (on XZ ground plane)
+            let dx = worldPos.x - userPos.x
+            let dz = worldPos.z - userPos.z
+            let dist = sqrt(dx * dx + dz * dz)
+
+            // Filter: ignore vertices too far or too close, or significantly above/below user height
+            let heightDiff = worldPos.y - userPos.y
+            if dist > maxDistance || dist < 0.1 { continue }
+            if heightDiff > 2.0 || heightDiff < -0.5 { continue }  // Only obstacles at walkable height
+
+            // Angle from user to vertex relative to user's forward direction
+            let vertexAngle = atan2(dx, dz)
+            var relAngle = vertexAngle - userYaw
+            // Normalize to [0, 2π)
+            if relAngle < 0 { relAngle += 2 * .pi }
+            if relAngle >= 2 * .pi { relAngle -= 2 * .pi }
+
+            // Map to sector and ring
+            let sector = Int(relAngle / (2 * .pi) * Float(sectorCount)) % sectorCount
+            let ring = min(Int(dist / ringWidth), ringCount - 1)
+
+            // Update grid with minimum distance
+            grid[sector][ring] = min(grid[sector][ring], dist)
+            sectorTimestamps[sector] = timestamp
+        }
+    }
+
+    /// Decays old sectors that haven't been updated recently.
+    func decayOldData(currentTimestamp: TimeInterval) {
+        for sector in 0..<sectorCount {
+            if currentTimestamp - sectorTimestamps[sector] > decayInterval {
+                for ring in 0..<ringCount {
+                    grid[sector][ring] = 999
+                }
+            }
+        }
+    }
+
+    /// Returns the nearest obstacle distance in a given angular range (in sectors relative to forward).
+    /// Sector 0 = directly ahead, sectorCount/4 = right 90°, etc.
+    func nearestInSectors(_ sectorRange: Range<Int>) -> Float {
+        var nearest: Float = 999
+        for s in sectorRange {
+            let sector = ((s % sectorCount) + sectorCount) % sectorCount
+            for ring in 0..<ringCount {
+                nearest = min(nearest, grid[sector][ring])
+            }
+        }
+        return nearest
+    }
+
+    /// Returns the nearest obstacle in the front-left quadrant (sectors to the left of forward).
+    var nearestFrontLeft: Float {
+        // Sectors covering roughly -90° to 0° (left of forward)
+        // With 12 sectors: sector 0 = ahead, sectors 9-11 = left side
+        let quarterCount = sectorCount / 4
+        return nearestInSectors((sectorCount - quarterCount)..<sectorCount)
+    }
+
+    /// Returns the nearest obstacle in the front-right quadrant.
+    var nearestFrontRight: Float {
+        // Sectors covering roughly 0° to +90° (right of forward)
+        let quarterCount = sectorCount / 4
+        return nearestInSectors(1..<(1 + quarterCount))
+    }
+
+    /// Returns the nearest obstacle directly ahead (narrow cone).
+    var nearestAhead: Float {
+        // Sector 0 = directly ahead, plus the two adjacent sectors
+        let ahead = grid[0].min() ?? 999
+        let slightLeft = grid[sectorCount - 1].min() ?? 999
+        let slightRight = grid[1].min() ?? 999
+        return min(ahead, min(slightLeft, slightRight))
+    }
+
+    /// Returns a summary of spatial awareness: which direction has the closest obstacle.
+    var dominantObstacleDirection: HapticDirection {
+        let left = nearestFrontLeft
+        let right = nearestFrontRight
+        let ahead = nearestAhead
+
+        // No obstacle within range
+        if ahead > maxDistance && left > maxDistance && right > maxDistance {
+            return .none
+        }
+
+        // Ahead is closest
+        if ahead <= left && ahead <= right && ahead < maxDistance {
+            return .center
+        }
+        // Left is closest
+        if left < right && left < maxDistance {
+            return .left
+        }
+        // Right is closest
+        if right < maxDistance {
+            return .right
+        }
+        return .none
+    }
+}
+
 public enum StairDirection: String {
     case up = "going up"
     case down = "going down"
@@ -53,6 +225,25 @@ public enum ProximityLevel: Int, Comparable {
     }
 }
 
+// MARK: - Haptic Direction
+/// Encodes obstacle direction for directional haptic feedback via sharpness differentiation.
+public enum HapticDirection: String {
+    case left = "left"
+    case center = "center"
+    case right = "right"
+    case none = "none"
+
+    /// CoreHaptics sharpness value: low = dull/soft ("left feel"), high = crisp/sharp ("right feel")
+    var sharpnessValue: Float {
+        switch self {
+        case .left:   return 0.3   // Soft, rounded vibration
+        case .center: return 0.5   // Neutral mid-range
+        case .right:  return 0.8   // Sharp, crisp vibration
+        case .none:   return 0.0
+        }
+    }
+}
+
 // MARK: - FOV Box Configuration
 public struct FOVBoxConfig {
     var widthRatio: CGFloat = 0.35  // Narrower: sized for human passage (~shoulder width)
@@ -86,13 +277,16 @@ class NavigationCameraManager: NSObject, ObservableObject {
     // FOV Box (resizable)
     @Published var fovConfig: FOVBoxConfig = FOVBoxConfig()
 
-    // Obstacle spatial data (updated by LiDAR at 10Hz)
+    // Obstacle spatial data (updated by LiDAR at 5Hz)
     @Published var obstacleInFOV: Bool = false
     @Published var obstacleDirection: String = "none"   // "left", "center", "right", "none"
     @Published var pathClear: Bool = true
     @Published var leftZoneDistance: Float = 999
     @Published var centerZoneDistance: Float = 999
     @Published var rightZoneDistance: Float = 999
+    // 5-zone spatial awareness (finer granularity for directional haptics)
+    @Published var farLeftZoneDistance: Float = 999
+    @Published var farRightZoneDistance: Float = 999
 
     // LiDAR-only stair detection (independent of YOLO — safety fallback)
     @Published var lidarStairsDetected: Bool = false
@@ -112,6 +306,12 @@ class NavigationCameraManager: NSObject, ObservableObject {
     private var lastLiDARStairTime: TimeInterval = 0
     private let lidarStairInterval: TimeInterval = 0.3  // Check stairs every 300ms
 
+    // Spatial map built from ARKit mesh reconstruction (like robotic vacuum mapping)
+    let spatialMap = SpatialMap()
+    private var lastSpatialMapUpdate: TimeInterval = 0
+    private let spatialMapInterval: TimeInterval = 0.5  // Update map every 500ms
+    private var lastCameraTransform: simd_float4x4 = matrix_identity_float4x4
+
     let arSession = ARSession()
     private var hapticTimer: Timer?
 
@@ -119,6 +319,7 @@ class NavigationCameraManager: NSObject, ObservableObject {
     private var hapticEngine: CHHapticEngine?
     private var continuousPlayer: CHHapticAdvancedPatternPlayer?
     private var engineRunning = false
+    private var currentHapticDirection: HapticDirection = .none
 
     // Frame throttling — skip frames to avoid overwhelming the main thread
     private let depthQueue = DispatchQueue(label: "depthAnalysis", qos: .userInitiated)
@@ -279,6 +480,94 @@ class NavigationCameraManager: NSObject, ObservableObject {
         hapticTimer = nil
         stopContinuousHaptic()
         currentProximity = .none
+        currentHapticDirection = .none
+    }
+
+    // MARK: - Directional Haptic Feedback (Sharpness Differentiation)
+
+    /// Updates haptics with both distance-based intensity and direction-based sharpness.
+    /// Left obstacles produce a soft/dull vibration; right obstacles produce a sharp/crisp vibration.
+    func updateDirectionalHaptics(forDistance distance: Float, direction: HapticDirection) {
+        let newProximity: ProximityLevel
+        if distance < 0.5 { newProximity = .veryHigh }
+        else if distance < 1.0 { newProximity = .high }
+        else if distance < 2.0 { newProximity = .medium }
+        else if distance < 3.0 { newProximity = .low }
+        else if distance < 4.0 { newProximity = .veryLow }
+        else { newProximity = .none }
+
+        // Only update if proximity or direction changed
+        guard newProximity != currentProximity || direction != currentHapticDirection else { return }
+
+        currentProximity = newProximity
+        currentHapticDirection = direction
+        nearestObstacleDistance = distance
+
+        playDirectionalHaptic(proximity: newProximity, direction: direction)
+    }
+
+    private func playDirectionalHaptic(proximity: ProximityLevel, direction: HapticDirection) {
+        hapticTimer?.invalidate()
+        hapticTimer = nil
+
+        guard proximity != .none, direction != .none else {
+            stopContinuousHaptic()
+            return
+        }
+
+        if engineRunning, let engine = hapticEngine {
+            playCoreDirectionalPattern(engine: engine, proximity: proximity, direction: direction)
+        } else {
+            // Fallback: legacy haptic (no direction encoding possible)
+            startLegacyHapticPattern(for: proximity)
+        }
+    }
+
+    /// Builds a CoreHaptics pattern where direction is encoded through sharpness:
+    /// - Left obstacle: sharpness 0.3 (soft/dull feel)
+    /// - Right obstacle: sharpness 0.8 (sharp/crisp feel)
+    /// - Center obstacle: sharpness 0.5 (neutral) with tighter pulse interval
+    private func playCoreDirectionalPattern(engine: CHHapticEngine, proximity: ProximityLevel, direction: HapticDirection) {
+        stopContinuousHaptic()
+
+        // At very high proximity (<0.5m), override to center/urgent feel
+        let effectiveDirection = proximity == .veryHigh ? HapticDirection.center : direction
+
+        let intensity = CHHapticEventParameter(
+            parameterID: .hapticIntensity, value: proximity.hapticIntensity
+        )
+        let sharpness = CHHapticEventParameter(
+            parameterID: .hapticSharpness, value: effectiveDirection.sharpnessValue
+        )
+
+        var events: [CHHapticEvent] = []
+        var interval = proximity.hapticInterval
+        // Center obstacles get a slightly tighter interval for urgency
+        if effectiveDirection == .center {
+            interval = max(0.04, interval * 0.8)
+        }
+        let patternDuration: TimeInterval = 2.0
+        var time: TimeInterval = 0
+
+        while time < patternDuration {
+            let event = CHHapticEvent(
+                eventType: .hapticTransient,
+                parameters: [intensity, sharpness],
+                relativeTime: time
+            )
+            events.append(event)
+            time += interval
+        }
+
+        do {
+            let pattern = try CHHapticPattern(events: events, parameters: [])
+            let player = try engine.makeAdvancedPlayer(with: pattern)
+            player.loopEnabled = true
+            try player.start(atTime: CHHapticTimeImmediate)
+            continuousPlayer = player
+        } catch {
+            startLegacyHapticPattern(for: proximity)
+        }
     }
 
     // MARK: - LiDAR Stair Step Counting
@@ -368,8 +657,15 @@ class NavigationCameraManager: NSObject, ObservableObject {
             config.frameSemantics.insert(.sceneDepth)
         }
         config.planeDetection = [.horizontal]
+
+        // Enable mesh-based scene reconstruction for spatial mapping (LiDAR devices only)
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            config.sceneReconstruction = .mesh
+        }
+
         arSession.delegate = self
         arSession.run(config, options: [.resetTracking])
+        spatialMap.reset()
         DispatchQueue.main.async { self.isSessionRunning = true }
 
         // Restart haptic engine if needed
@@ -395,6 +691,8 @@ class NavigationCameraManager: NSObject, ObservableObject {
             self.leftZoneDistance = 999
             self.centerZoneDistance = 999
             self.rightZoneDistance = 999
+            self.farLeftZoneDistance = 999
+            self.farRightZoneDistance = 999
             self.lidarStairsDetected = false
             self.lidarStairCount = 0
             self.lidarStairDirection = .unknown
@@ -406,10 +704,12 @@ class NavigationCameraManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Three-Zone Depth Analysis with Side Margins
-    /// Divides the analysis area into left-margin / center-passage / right-margin zones.
+    // MARK: - Five-Zone Depth Analysis with Spatial Awareness
+    /// Divides the analysis area into 5 zones for fine-grained spatial awareness:
+    /// farLeft / left / center / right / farRight
     /// The center zone matches the FOV box (human passage width).
-    /// Left/right margin zones extend beyond the FOV box to detect incoming obstacles.
+    /// Left/right are inner halves of the margin; farLeft/farRight are outer halves.
+    /// This enables directional haptic feedback based on obstacle position.
     private func analyzeDepthInFOVBox(_ depthData: ARDepthData) {
         let depthMap = depthData.depthMap
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
@@ -433,7 +733,13 @@ class NavigationCameraManager: NSObject, ObservableObject {
         let extStartX = max(0, Int((fovBox.minX - margin) * CGFloat(width)))
         let extEndX = min(width, Int((fovBox.maxX + margin) * CGFloat(width)))
 
-        var minDistLeft: Float = 999, minDistCenter: Float = 999, minDistRight: Float = 999
+        // 5-zone boundaries: split each margin into inner and outer halves
+        let leftMarginMid = (extStartX + centerStartX) / 2
+        let rightMarginMid = (centerEndX + extEndX) / 2
+
+        var minDistFarLeft: Float = 999, minDistLeft: Float = 999
+        var minDistCenter: Float = 999
+        var minDistRight: Float = 999, minDistFarRight: Float = 999
         var totalDepth: Float = 0, validCount: Float = 0
         var overallMin: Float = 999
 
@@ -448,25 +754,30 @@ class NavigationCameraManager: NSObject, ObservableObject {
                     totalDepth += depth
                     validCount += 1
 
-                    // Classify: left margin / center passage / right margin
-                    if x < centerStartX {
-                        // Left margin zone — incoming obstacles from left
+                    // Classify into 5 zones
+                    if x < leftMarginMid {
+                        minDistFarLeft = min(minDistFarLeft, depth)
+                    } else if x < centerStartX {
                         minDistLeft = min(minDistLeft, depth)
-                    } else if x >= centerEndX {
-                        // Right margin zone — incoming obstacles from right
-                        minDistRight = min(minDistRight, depth)
-                    } else {
-                        // Center zone — direct path obstacles
+                    } else if x < centerEndX {
                         minDistCenter = min(minDistCenter, depth)
                         overallMin = min(overallMin, depth)
+                    } else if x < rightMarginMid {
+                        minDistRight = min(minDistRight, depth)
+                    } else {
+                        minDistFarRight = min(minDistFarRight, depth)
                     }
                 }
             }
         }
 
-        // Overall minimum considers center (passage) zone primarily,
+        // Combined left/right distances (backward-compatible with 3-zone consumers)
+        let combinedLeft = min(minDistFarLeft, minDistLeft)
+        let combinedRight = min(minDistRight, minDistFarRight)
+
+        // Overall minimum considers center zone primarily,
         // but also triggers if side obstacles are very close
-        let sideMin = min(minDistLeft, minDistRight)
+        let sideMin = min(combinedLeft, combinedRight)
         if sideMin < 1.5 { overallMin = min(overallMin, sideMin) }
 
         let avgDepth = validCount > 0 ? totalDepth / validCount : 999
@@ -480,9 +791,9 @@ class NavigationCameraManager: NSObject, ObservableObject {
         let direction: String
         if minDistCenter < warningThreshold && minDistCenter <= sideMin {
             direction = "center"
-        } else if minDistLeft < 2.0 && minDistLeft < minDistRight {
+        } else if combinedLeft < 2.0 && combinedLeft < combinedRight {
             direction = "left"
-        } else if minDistRight < 2.0 && minDistRight < minDistLeft {
+        } else if combinedRight < 2.0 && combinedRight < combinedLeft {
             direction = "right"
         } else if minDistCenter < warningThreshold {
             direction = "center"
@@ -493,9 +804,11 @@ class NavigationCameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.nearestObstacleDistance = overallMin
             self.averageDepthInFOV = avgDepth
-            self.leftZoneDistance = minDistLeft
+            self.leftZoneDistance = combinedLeft
             self.centerZoneDistance = minDistCenter
-            self.rightZoneDistance = minDistRight
+            self.rightZoneDistance = combinedRight
+            self.farLeftZoneDistance = minDistFarLeft
+            self.farRightZoneDistance = minDistFarRight
             self.obstacleInFOV = hasObstacle
             self.obstacleDirection = direction
             self.pathClear = isPathClear
@@ -779,6 +1092,9 @@ extension NavigationCameraManager: ARSessionDelegate {
         let buffer = frame.capturedImage
         let depth = frame.smoothedSceneDepth ?? frame.sceneDepth
 
+        // Store camera transform for spatial map processing
+        lastCameraTransform = frame.camera.transform
+
         // Extract device pitch from camera transform (eulerAngles.x)
         // In ARKit portrait mode: ~0 = phone upright, large negative = pointing at ground
         let pitch = frame.camera.eulerAngles.x  // radians
@@ -786,9 +1102,10 @@ extension NavigationCameraManager: ARSessionDelegate {
         // In portrait mode with camera facing away, pitch < -0.95 rad ≈ phone looking at floor
         let pointingAtGround = pitch < -0.95  // ~55 degrees below horizontal
 
+        let now = frame.timestamp
+
         // Throttle depth analysis on a background queue
         if let d = depth, !isAnalyzingDepth {
-            let now = frame.timestamp
             if now - lastDepthAnalysisTime >= depthAnalysisInterval {
                 lastDepthAnalysisTime = now
                 isAnalyzingDepth = true
@@ -808,11 +1125,42 @@ extension NavigationCameraManager: ARSessionDelegate {
             }
         }
 
+        // Decay old spatial map data periodically
+        if now - lastSpatialMapUpdate >= spatialMapInterval {
+            lastSpatialMapUpdate = now
+            depthQueue.async { [weak self] in
+                self?.spatialMap.decayOldData(currentTimestamp: now)
+            }
+        }
+
         DispatchQueue.main.async {
             self.currentFrame = buffer
             self.currentDepthData = depth
             self.devicePitch = pitch
             self.isPhonePointingAtGround = pointingAtGround
+        }
+    }
+
+    // Process new mesh anchors from scene reconstruction
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        processMeshAnchors(anchors)
+    }
+
+    // Process updated mesh anchors as the scene is refined
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        processMeshAnchors(anchors)
+    }
+
+    private func processMeshAnchors(_ anchors: [ARAnchor]) {
+        let cameraTransform = lastCameraTransform
+        let timestamp = CACurrentMediaTime()
+
+        depthQueue.async { [weak self] in
+            guard let self = self else { return }
+            for anchor in anchors {
+                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
+                self.spatialMap.updateFromMesh(meshAnchor, cameraTransform: cameraTransform, timestamp: timestamp)
+            }
         }
     }
 
