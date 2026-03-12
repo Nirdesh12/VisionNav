@@ -1111,8 +1111,10 @@ struct RouteNavigationView: View {
             phonePointingAtGround: cameraManager.isPhonePointingAtGround
         )
 
-        // Directional haptic feedback — sharpness encodes obstacle direction.
-        // Merges real-time depth analysis (FOV-based) with spatial map (mesh-based 360° awareness).
+        // Directional haptic feedback — merges three sources:
+        //   1. FOV 5-zone depth analysis (instant, per-frame)
+        //   2. Occupancy grid (accumulated Bayesian map, robot-vacuum style)
+        //   3. VFH planner (humanoid-robot obstacle avoidance steering)
         let feedbackMode = FeedbackMode(
             rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
         ) ?? .hapticWithCriticalVoice
@@ -1128,24 +1130,38 @@ struct RouteNavigationView: View {
             default:       direction = .none
             }
 
-            // Augment with spatial map: if FOV sees nothing but map has nearby obstacles
-            // from outside the camera view (e.g., approaching from behind or side)
-            let map = cameraManager.spatialMap
-            let mapDirection = map.dominantObstacleDirection
-            let mapLeftDist = map.nearestFrontLeft
-            let mapRightDist = map.nearestFrontRight
-            let mapAheadDist = map.nearestAhead
+            // Augment with occupancy grid: accumulated map detects obstacles
+            // outside current camera view (previously seen, approaching from side)
+            let grid = cameraManager.occupancyGrid
+            let gridDirection = grid.dominantObstacleDirection
+            let gridLeftDist = grid.nearestFrontLeft
+            let gridRightDist = grid.nearestFrontRight
+            let gridAheadDist = grid.nearestAhead
 
-            if direction == .none && mapDirection != .none {
-                // Spatial map detected an obstacle that depth analysis missed
-                direction = mapDirection
-                hapticDistance = min(mapLeftDist, min(mapRightDist, mapAheadDist))
+            if direction == .none && gridDirection != .none {
+                // Occupancy grid detected an obstacle that FOV depth missed
+                direction = gridDirection
+                hapticDistance = min(gridLeftDist, min(gridRightDist, gridAheadDist))
             } else if direction != .none {
-                // Both sources active — use the closest obstacle from either source
-                let mapNearest = min(mapLeftDist, min(mapRightDist, mapAheadDist))
-                if mapNearest < hapticDistance && mapDirection != .none {
-                    direction = mapDirection
-                    hapticDistance = mapNearest
+                // Both sources active — use the closest obstacle from either
+                let gridNearest = min(gridLeftDist, min(gridRightDist, gridAheadDist))
+                if gridNearest < hapticDistance && gridDirection != .none {
+                    direction = gridDirection
+                    hapticDistance = gridNearest
+                }
+            }
+
+            // Override with VFH steering when path is blocked or VFH suggests a turn
+            // VFH provides the safest navigable gap direction (humanoid-robot style)
+            let vfhDirection = cameraManager.vfhSuggestedDirection
+            if cameraManager.isPathBlocked {
+                // All directions blocked — signal center urgency
+                direction = .center
+                hapticDistance = min(hapticDistance, gridAheadDist)
+            } else if vfhDirection != .none && vfhDirection != direction {
+                // VFH found a better gap — blend with current if VFH is more urgent
+                if gridAheadDist < 2.5 || hapticDistance < 2.0 {
+                    direction = vfhDirection
                 }
             }
 

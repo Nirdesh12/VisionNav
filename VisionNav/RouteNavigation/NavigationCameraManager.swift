@@ -12,175 +12,558 @@ import UIKit
 import Combine
 import CoreHaptics
 
-// MARK: - Spatial Map (2D Polar Occupancy Grid from ARKit Mesh Reconstruction)
-/// Builds a persistent 2D occupancy grid around the user from ARMeshAnchor data,
-/// similar to how a robotic vacuum maps a room. Tracks obstacle positions in angular
-/// sectors at varying distances, surviving across frames even when obstacles leave the FOV.
-class SpatialMap {
-    /// Number of angular sectors (360° / sectorCount). 12 sectors = 30° each.
-    let sectorCount: Int = 12
-    /// Distance rings in meters from the user. Each ring is 1m wide.
-    let maxDistance: Float = 5.0
-    let ringWidth: Float = 0.5
-    /// Grid: [sector][ring] = minimum obstacle distance within that cell.
-    /// 999 = no obstacle detected. Lower = closer obstacle.
-    private(set) var grid: [[Float]]
-    /// Timestamp of last update per sector (for decay)
-    private var sectorTimestamps: [TimeInterval]
-    /// How quickly old data decays (seconds). After this, unrefreshed cells reset.
-    let decayInterval: TimeInterval = 3.0
+// MARK: - Depth Processing Pipeline (Robotics-Standard)
+/// Processes raw LiDAR depth frames through statistical outlier removal,
+/// bilateral filtering, and temporal fusion for clean, stable depth data.
+class DepthProcessor {
+    private let outlierKernel = 2        // Half-size of 5x5 neighborhood
+    private let outlierSigma: Float = 2.0
+    private let bilateralKernel = 2      // Half-size of 5x5 window
+    private let bilateralSigmaSpatial: Float = 2.0
+    private let bilateralSigmaDepth: Float = 0.15
+    private let temporalAlpha: Float = 0.6
 
-    var ringCount: Int { Int(maxDistance / ringWidth) }
+    private var previousDepth: [Float]?
+    private(set) var cleanDepth: [Float] = []
+    private(set) var validMask: [Bool] = []
 
-    init() {
-        let rings = Int(5.0 / 0.5)  // 10 rings
-        grid = Array(repeating: Array(repeating: Float(999), count: rings), count: 12)
-        sectorTimestamps = Array(repeating: 0, count: 12)
-    }
+    func reset() { previousDepth = nil }
 
-    /// Clears the entire map.
-    func reset() {
-        let rings = ringCount
-        grid = Array(repeating: Array(repeating: Float(999), count: rings), count: sectorCount)
-        sectorTimestamps = Array(repeating: 0, count: sectorCount)
-    }
+    /// Full pipeline: raw CVPixelBuffer → (cleanDepth, validMask)
+    func process(_ depthMap: CVPixelBuffer) -> (depth: [Float], valid: [Bool]) {
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
 
-    /// Updates the map from an ARMeshAnchor's geometry, projected relative to the user's current position.
-    /// - Parameters:
-    ///   - anchor: The mesh anchor containing 3D vertex data
-    ///   - cameraTransform: The current camera (user) transform from ARFrame
-    ///   - timestamp: Frame timestamp for decay tracking
-    func updateFromMesh(_ anchor: ARMeshAnchor, cameraTransform: simd_float4x4, timestamp: TimeInterval) {
-        let meshTransform = anchor.transform
-        let geometry = anchor.geometry
-        let vertexBuffer = geometry.vertices
-        let vertexCount = vertexBuffer.count
-
-        // User position in world coordinates
-        let userPos = simd_float3(cameraTransform.columns.3.x,
-                                   cameraTransform.columns.3.y,
-                                   cameraTransform.columns.3.z)
-
-        // User forward direction (negative Z in camera space, projected to XZ plane)
-        let forward = simd_float3(-cameraTransform.columns.2.x,
-                                    0,
-                                    -cameraTransform.columns.2.z)
-        let forwardNorm = simd_normalize(forward)
-        // User's yaw angle (heading on XZ plane)
-        let userYaw = atan2(forwardNorm.x, forwardNorm.z)
-
-        // Sample vertices (stride for performance — every 4th vertex)
-        let stride = max(1, vertexCount / 200)
-
-        for i in Swift.stride(from: 0, to: vertexCount, by: stride) {
-            // Read vertex position in mesh-local space
-            let vertexPointer = vertexBuffer.buffer.contents()
-                .advanced(by: vertexBuffer.offset + i * vertexBuffer.stride)
-            let localPos = vertexPointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-
-            // Transform to world space
-            let worldPos4 = meshTransform * simd_float4(localPos.x, localPos.y, localPos.z, 1.0)
-            let worldPos = simd_float3(worldPos4.x, worldPos4.y, worldPos4.z)
-
-            // Vector from user to vertex (on XZ ground plane)
-            let dx = worldPos.x - userPos.x
-            let dz = worldPos.z - userPos.z
-            let dist = sqrt(dx * dx + dz * dz)
-
-            // Filter: ignore vertices too far or too close, or significantly above/below user height
-            let heightDiff = worldPos.y - userPos.y
-            if dist > maxDistance || dist < 0.1 { continue }
-            if heightDiff > 2.0 || heightDiff < -0.5 { continue }  // Only obstacles at walkable height
-
-            // Angle from user to vertex relative to user's forward direction
-            let vertexAngle = atan2(dx, dz)
-            var relAngle = vertexAngle - userYaw
-            // Normalize to [0, 2π)
-            if relAngle < 0 { relAngle += 2 * .pi }
-            if relAngle >= 2 * .pi { relAngle -= 2 * .pi }
-
-            // Map to sector and ring
-            let sector = Int(relAngle / (2 * .pi) * Float(sectorCount)) % sectorCount
-            let ring = min(Int(dist / ringWidth), ringCount - 1)
-
-            // Update grid with minimum distance
-            grid[sector][ring] = min(grid[sector][ring], dist)
-            sectorTimestamps[sector] = timestamp
+        let w = CVPixelBufferGetWidth(depthMap)
+        let h = CVPixelBufferGetHeight(depthMap)
+        let bpr = CVPixelBufferGetBytesPerRow(depthMap)
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else {
+            return ([], [])
         }
+
+        let count = w * h
+        var raw = [Float](repeating: 0, count: count)
+        var valid = [Bool](repeating: false, count: count)
+
+        // Read raw depth and mark valid pixels
+        for y in 0..<h {
+            let row = base.advanced(by: y * bpr).assumingMemoryBound(to: Float32.self)
+            for x in 0..<w {
+                let d = row[x]
+                let idx = y * w + x
+                if d.isFinite && d > 0.1 && d < 6.0 {
+                    raw[idx] = d
+                    valid[idx] = true
+                }
+            }
+        }
+
+        // Stage 1: Statistical outlier removal
+        removeOutliers(&raw, &valid, width: w, height: h)
+
+        // Stage 2: Bilateral filter (edge-preserving smoothing)
+        var filtered = bilateralFilter(raw, valid: valid, width: w, height: h)
+
+        // Stage 3: Temporal fusion (EMA with previous frame)
+        temporalFuse(&filtered, valid: &valid)
+
+        cleanDepth = filtered
+        validMask = valid
+        return (filtered, valid)
     }
 
-    /// Decays old sectors that haven't been updated recently.
-    func decayOldData(currentTimestamp: TimeInterval) {
-        for sector in 0..<sectorCount {
-            if currentTimestamp - sectorTimestamps[sector] > decayInterval {
-                for ring in 0..<ringCount {
-                    grid[sector][ring] = 999
+    /// Stage 1: If pixel depth differs from 5×5 neighbor mean by >2σ, mark invalid.
+    private func removeOutliers(_ depth: inout [Float], _ valid: inout [Bool], width w: Int, height h: Int) {
+        let k = outlierKernel
+        for y in k..<(h - k) {
+            for x in k..<(w - k) {
+                let idx = y * w + x
+                guard valid[idx] else { continue }
+                var sum: Float = 0, sumSq: Float = 0, n: Float = 0
+                for dy in -k...k {
+                    for dx in -k...k {
+                        let ni = (y + dy) * w + (x + dx)
+                        if valid[ni] {
+                            sum += depth[ni]; sumSq += depth[ni] * depth[ni]; n += 1
+                        }
+                    }
+                }
+                guard n > 3 else { continue }
+                let mean = sum / n
+                let variance = sumSq / n - mean * mean
+                let sigma = sqrt(max(variance, 0.0001))
+                if abs(depth[idx] - mean) > outlierSigma * sigma {
+                    valid[idx] = false
                 }
             }
         }
     }
 
-    /// Returns the nearest obstacle distance in a given angular range (in sectors relative to forward).
-    /// Sector 0 = directly ahead, sectorCount/4 = right 90°, etc.
-    func nearestInSectors(_ sectorRange: Range<Int>) -> Float {
+    /// Stage 2: Bilateral filter — smooths noise while preserving depth edges.
+    private func bilateralFilter(_ depth: [Float], valid: [Bool], width w: Int, height h: Int) -> [Float] {
+        var output = depth
+        let k = bilateralKernel
+        let spatialDenom = 2.0 * bilateralSigmaSpatial * bilateralSigmaSpatial
+        let depthDenom = 2.0 * bilateralSigmaDepth * bilateralSigmaDepth
+
+        for y in k..<(h - k) {
+            for x in k..<(w - k) {
+                let idx = y * w + x
+                guard valid[idx] else { continue }
+                let centerD = depth[idx]
+                var weightedSum: Float = 0, weightTotal: Float = 0
+                for dy in -k...k {
+                    for dx in -k...k {
+                        let ni = (y + dy) * w + (x + dx)
+                        guard valid[ni] else { continue }
+                        let spatialDist = Float(dx * dx + dy * dy)
+                        let depthDiff = depth[ni] - centerD
+                        let weight = exp(-spatialDist / spatialDenom) * exp(-(depthDiff * depthDiff) / depthDenom)
+                        weightedSum += depth[ni] * weight
+                        weightTotal += weight
+                    }
+                }
+                if weightTotal > 0 { output[idx] = weightedSum / weightTotal }
+            }
+        }
+        return output
+    }
+
+    /// Stage 3: Temporal fusion — EMA per pixel to reduce flickering.
+    private func temporalFuse(_ depth: inout [Float], valid: inout [Bool]) {
+        guard let prev = previousDepth, prev.count == depth.count else {
+            previousDepth = depth
+            return
+        }
+        let alpha = temporalAlpha
+        for i in 0..<depth.count {
+            if valid[i] && prev[i] > 0.05 {
+                depth[i] = alpha * depth[i] + (1 - alpha) * prev[i]
+            }
+        }
+        previousDepth = depth
+    }
+}
+
+// MARK: - Bayesian Occupancy Grid (Robot Vacuum Style Mapping)
+/// 2D Cartesian occupancy grid using log-odds representation with Bresenham ray casting.
+/// Progressively accumulates evidence about obstacle positions like a robotic vacuum.
+/// World-fixed coordinates — rotation changes queries, not data.
+class OccupancyGrid {
+    let gridSize: Int = 50            // 50×50 cells
+    let cellSize: Float = 0.2         // 0.2m per cell → 10m × 10m coverage
+    let halfExtent: Float = 5.0       // 5m in each direction
+
+    // Log-odds: 0 = unknown (P=0.5), positive = occupied, negative = free
+    private(set) var logOdds: [Float]
+
+    // Bayesian sensor model
+    private let logOddsOccupied: Float = 0.85
+    private let logOddsFree: Float = -0.4
+    private let logOddsClamp: Float = 5.0
+    private let occupiedProbThreshold: Float = 0.65  // For query: consider occupied above this
+
+    // Grid origin in world coordinates (bottom-left corner of grid)
+    private(set) var originX: Float = 0
+    private(set) var originZ: Float = 0
+    private var isInitialized = false
+
+    // Current user pose (updated each frame for queries)
+    private(set) var userWorldX: Float = 0
+    private(set) var userWorldZ: Float = 0
+    private(set) var userYaw: Float = 0
+
+    init() {
+        logOdds = [Float](repeating: 0, count: 50 * 50)
+    }
+
+    func reset() {
+        logOdds = [Float](repeating: 0, count: gridSize * gridSize)
+        isInitialized = false
+    }
+
+    // MARK: - Coordinate Conversion
+
+    func worldToGrid(_ wx: Float, _ wz: Float) -> (x: Int, z: Int)? {
+        let gx = Int((wx - originX) / cellSize)
+        let gz = Int((wz - originZ) / cellSize)
+        guard gx >= 0, gx < gridSize, gz >= 0, gz < gridSize else { return nil }
+        return (gx, gz)
+    }
+
+    private func gridToWorld(_ gx: Int, _ gz: Int) -> (x: Float, z: Float) {
+        (originX + (Float(gx) + 0.5) * cellSize,
+         originZ + (Float(gz) + 0.5) * cellSize)
+    }
+
+    /// Probability of occupancy for a cell (0.0 to 1.0)
+    func probability(at index: Int) -> Float {
+        let l = logOdds[index]
+        return 1.0 / (1.0 + exp(-l))
+    }
+
+    // MARK: - Rolling Window
+
+    private func rollGrid(centerX: Float, centerZ: Float) {
+        let newOriginX = centerX - halfExtent
+        let newOriginZ = centerZ - halfExtent
+
+        if !isInitialized {
+            originX = newOriginX
+            originZ = newOriginZ
+            isInitialized = true
+            return
+        }
+
+        let shiftX = Int((newOriginX - originX) / cellSize)
+        let shiftZ = Int((newOriginZ - originZ) / cellSize)
+
+        if abs(shiftX) == 0 && abs(shiftZ) == 0 { return }
+
+        var newGrid = [Float](repeating: 0, count: gridSize * gridSize)
+        for gz in 0..<gridSize {
+            for gx in 0..<gridSize {
+                let oldX = gx + shiftX
+                let oldZ = gz + shiftZ
+                if oldX >= 0, oldX < gridSize, oldZ >= 0, oldZ < gridSize {
+                    newGrid[gz * gridSize + gx] = logOdds[oldZ * gridSize + oldX]
+                }
+            }
+        }
+        logOdds = newGrid
+        originX = newOriginX
+        originZ = newOriginZ
+    }
+
+    // MARK: - Bresenham Ray Casting
+
+    /// Casts a ray from (x0,z0) to (x1,z1) in grid coordinates.
+    /// Cells along the ray → FREE, endpoint → OCCUPIED.
+    private func castRay(fromX x0: Int, fromZ z0: Int, toX x1: Int, toZ z1: Int) {
+        var x = x0, z = z0
+        let dx = abs(x1 - x0), dz = abs(z1 - z0)
+        let sx = x0 < x1 ? 1 : -1, sz = z0 < z1 ? 1 : -1
+        var err = dx - dz
+
+        while true {
+            let atEnd = (x == x1 && z == z1)
+            if x >= 0, x < gridSize, z >= 0, z < gridSize {
+                let idx = z * gridSize + x
+                if atEnd {
+                    logOdds[idx] = min(logOdds[idx] + logOddsOccupied, logOddsClamp)
+                } else {
+                    logOdds[idx] = max(logOdds[idx] + logOddsFree, -logOddsClamp)
+                }
+            }
+            if atEnd { break }
+            let e2 = 2 * err
+            if e2 > -dz { err -= dz; x += sx }
+            if e2 < dx { err += dx; z += sz }
+        }
+    }
+
+    // MARK: - Update from Depth (Primary)
+
+    /// Updates the grid from processed depth data using ray casting.
+    /// Projects depth pixels to 3D world points, then casts rays through the grid.
+    func updateFromDepth(
+        cleanDepth: [Float], validMask: [Bool],
+        cameraTransform: simd_float4x4,
+        intrinsics: simd_float3x3,
+        depthWidth: Int, depthHeight: Int
+    ) {
+        let userPos = simd_float3(cameraTransform.columns.3.x,
+                                   cameraTransform.columns.3.y,
+                                   cameraTransform.columns.3.z)
+        let forward = simd_float3(-cameraTransform.columns.2.x, 0, -cameraTransform.columns.2.z)
+        let fwdNorm = simd_normalize(forward)
+
+        userWorldX = userPos.x
+        userWorldZ = userPos.z
+        userYaw = atan2(fwdNorm.x, fwdNorm.z)
+
+        // Roll grid to keep user centered
+        rollGrid(centerX: userPos.x, centerZ: userPos.z)
+
+        guard let userGrid = worldToGrid(userPos.x, userPos.z) else { return }
+
+        let fx = intrinsics[0][0]  // Focal length X
+        let fy = intrinsics[1][1]  // Focal length Y
+        let cx = intrinsics[2][0]  // Principal point X
+        let cy = intrinsics[2][1]  // Principal point Y
+
+        // Sample every 4th pixel for performance (~3000 rays)
+        let step = 4
+        for py in Swift.stride(from: 0, to: depthHeight, by: step) {
+            for px in Swift.stride(from: 0, to: depthWidth, by: step) {
+                let idx = py * depthWidth + px
+                guard validMask[idx] else { continue }
+                let depth = cleanDepth[idx]
+                guard depth > 0.1, depth < 5.0 else { continue }
+
+                // Pixel to camera-space 3D point
+                let camX = (Float(px) - cx) * depth / fx
+                let camY = (Float(py) - cy) * depth / fy
+                let camZ = depth
+
+                // Camera-space to world-space
+                let camPt = simd_float4(camX, camY, camZ, 1.0)
+                let worldPt = cameraTransform * camPt
+
+                // Height filter: only walkable-height obstacles
+                let heightDiff = worldPt.y - userPos.y
+                guard heightDiff > -0.5, heightDiff < 2.0 else { continue }
+
+                // Project to grid and cast ray
+                if let endGrid = worldToGrid(worldPt.x, worldPt.z) {
+                    castRay(fromX: userGrid.x, fromZ: userGrid.z,
+                            toX: endGrid.x, toZ: endGrid.z)
+                }
+            }
+        }
+    }
+
+    // MARK: - Update from Mesh (Supplementary)
+
+    /// Updates from ARMeshAnchor vertices (supplements depth-based ray casting).
+    func updateFromMesh(_ anchor: ARMeshAnchor, cameraTransform: simd_float4x4) {
+        let userPos = simd_float3(cameraTransform.columns.3.x,
+                                   cameraTransform.columns.3.y,
+                                   cameraTransform.columns.3.z)
+        let meshTransform = anchor.transform
+        let vertices = anchor.geometry.vertices
+        let vertexCount = vertices.count
+        let step = max(1, vertexCount / 300)
+
+        guard let userGrid = worldToGrid(userPos.x, userPos.z) else { return }
+
+        for i in Swift.stride(from: 0, to: vertexCount, by: step) {
+            let ptr = vertices.buffer.contents()
+                .advanced(by: vertices.offset + i * vertices.stride)
+            let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+            let world4 = meshTransform * simd_float4(local.x, local.y, local.z, 1.0)
+
+            let heightDiff = world4.y - userPos.y
+            guard heightDiff > -0.5, heightDiff < 2.0 else { continue }
+
+            let dx = world4.x - userPos.x, dz = world4.z - userPos.z
+            let dist = sqrt(dx * dx + dz * dz)
+            guard dist > 0.1, dist < halfExtent else { continue }
+
+            if let endGrid = worldToGrid(world4.x, world4.z) {
+                castRay(fromX: userGrid.x, fromZ: userGrid.z,
+                        toX: endGrid.x, toZ: endGrid.z)
+            }
+        }
+    }
+
+    // MARK: - Directional Queries (backward-compatible with old SpatialMap)
+
+    /// Nearest occupied cell in an angular range from user's forward direction.
+    private func nearestOccupied(angleMin: Float, angleMax: Float) -> Float {
         var nearest: Float = 999
-        for s in sectorRange {
-            let sector = ((s % sectorCount) + sectorCount) % sectorCount
-            for ring in 0..<ringCount {
-                nearest = min(nearest, grid[sector][ring])
+        for gz in 0..<gridSize {
+            for gx in 0..<gridSize {
+                let idx = gz * gridSize + gx
+                guard probability(at: idx) > occupiedProbThreshold else { continue }
+                let (wx, wz) = gridToWorld(gx, gz)
+                let dx = wx - userWorldX, dz = wz - userWorldZ
+                let dist = sqrt(dx * dx + dz * dz)
+                guard dist < halfExtent, dist > 0.1 else { continue }
+
+                var angle = atan2(dx, dz) - userYaw
+                if angle > .pi { angle -= 2 * .pi }
+                if angle < -.pi { angle += 2 * .pi }
+
+                if angle >= angleMin, angle <= angleMax {
+                    nearest = min(nearest, dist)
+                }
             }
         }
         return nearest
     }
 
-    /// Returns the nearest obstacle in the front-left quadrant (sectors to the left of forward).
-    var nearestFrontLeft: Float {
-        // Sectors covering roughly -90° to 0° (left of forward)
-        // With 12 sectors: sector 0 = ahead, sectors 9-11 = left side
-        let quarterCount = sectorCount / 4
-        return nearestInSectors((sectorCount - quarterCount)..<sectorCount)
-    }
+    var nearestFrontLeft: Float { nearestOccupied(angleMin: -.pi / 2, angleMax: -0.05) }
+    var nearestFrontRight: Float { nearestOccupied(angleMin: 0.05, angleMax: .pi / 2) }
+    var nearestAhead: Float { nearestOccupied(angleMin: -.pi / 6, angleMax: .pi / 6) }
 
-    /// Returns the nearest obstacle in the front-right quadrant.
-    var nearestFrontRight: Float {
-        // Sectors covering roughly 0° to +90° (right of forward)
-        let quarterCount = sectorCount / 4
-        return nearestInSectors(1..<(1 + quarterCount))
-    }
-
-    /// Returns the nearest obstacle directly ahead (narrow cone).
-    var nearestAhead: Float {
-        // Sector 0 = directly ahead, plus the two adjacent sectors
-        let ahead = grid[0].min() ?? 999
-        let slightLeft = grid[sectorCount - 1].min() ?? 999
-        let slightRight = grid[1].min() ?? 999
-        return min(ahead, min(slightLeft, slightRight))
-    }
-
-    /// Returns a summary of spatial awareness: which direction has the closest obstacle.
     var dominantObstacleDirection: HapticDirection {
-        let left = nearestFrontLeft
-        let right = nearestFrontRight
-        let ahead = nearestAhead
-
-        // No obstacle within range
-        if ahead > maxDistance && left > maxDistance && right > maxDistance {
-            return .none
-        }
-
-        // Ahead is closest
-        if ahead <= left && ahead <= right && ahead < maxDistance {
-            return .center
-        }
-        // Left is closest
-        if left < right && left < maxDistance {
-            return .left
-        }
-        // Right is closest
-        if right < maxDistance {
-            return .right
-        }
+        let left = nearestFrontLeft, right = nearestFrontRight, ahead = nearestAhead
+        if ahead > halfExtent && left > halfExtent && right > halfExtent { return .none }
+        if ahead <= left && ahead <= right && ahead < halfExtent { return .center }
+        if left < right && left < halfExtent { return .left }
+        if right < halfExtent { return .right }
         return .none
+    }
+}
+
+// MARK: - VFH Obstacle Avoidance (Humanoid Robot Style)
+/// Vector Field Histogram planner — builds a polar obstacle density histogram
+/// from the occupancy grid and finds the safest navigable gap.
+struct VFHResult {
+    let bestDirection: Float           // Radians relative to user forward (0 = ahead)
+    let hapticDirection: HapticDirection
+    let urgencyLevel: ProximityLevel
+    let isBlocked: Bool
+    let nearestObstacle: Float         // Distance to closest obstacle in any direction
+}
+
+class VFHPlanner {
+    let binCount: Int = 36             // 10° per bin, 360° coverage
+    private let binWidth: Float = .pi / 18.0  // 10° in radians
+    private let highThreshold: Float = 0.7
+    private let lowThreshold: Float = 0.3
+    private let minGapBins: Int = 3    // Minimum 30° gap for a person
+    private let maxInfluence: Float = 4.0
+    private var previousBlocked: [Bool]?
+
+    init() {}
+
+    func compute(grid: OccupancyGrid, userX: Float, userZ: Float,
+                 userYaw: Float, goalDirection: Float?) -> VFHResult {
+        // Stage 1: Build polar histogram from occupied cells
+        var histogram = [Float](repeating: 0, count: binCount)
+        var nearestDist: Float = 999
+
+        for gz in 0..<grid.gridSize {
+            for gx in 0..<grid.gridSize {
+                let idx = gz * grid.gridSize + gx
+                let prob = grid.probability(at: idx)
+                guard prob > 0.5 else { continue }
+
+                let wx = grid.originX + (Float(gx) + 0.5) * grid.cellSize
+                let wz = grid.originZ + (Float(gz) + 0.5) * grid.cellSize
+                let dx = wx - userX, dz = wz - userZ
+                let dist = sqrt(dx * dx + dz * dz)
+                guard dist > 0.1, dist < maxInfluence else { continue }
+
+                nearestDist = min(nearestDist, dist)
+
+                // Angle relative to user's forward
+                var angle = atan2(dx, dz) - userYaw
+                if angle > .pi { angle -= 2 * .pi }
+                if angle < -.pi { angle += 2 * .pi }
+
+                // Map to bin [0, binCount)
+                let normAngle = angle + .pi  // [0, 2π)
+                let bin = Int(normAngle / binWidth) % binCount
+
+                // Weight: closer obstacles and higher probability = more influence
+                let weight = prob * grid.cellSize / (dist * dist)
+                histogram[bin] += weight
+            }
+        }
+
+        // Stage 2: Threshold with hysteresis
+        var blocked = [Bool](repeating: false, count: binCount)
+        for i in 0..<binCount {
+            if let prev = previousBlocked, prev.count == binCount {
+                blocked[i] = prev[i] ? histogram[i] > lowThreshold : histogram[i] > highThreshold
+            } else {
+                blocked[i] = histogram[i] > highThreshold
+            }
+        }
+        previousBlocked = blocked
+
+        // Stage 3: Find gaps (contiguous free bins, circular)
+        var gaps: [(start: Int, width: Int)] = []
+        var gapStart = -1
+        // Unroll circular array
+        let extended = blocked + blocked
+        var i = 0
+        while i < extended.count {
+            if !extended[i] {
+                if gapStart == -1 { gapStart = i }
+            } else {
+                if gapStart != -1 {
+                    let width = i - gapStart
+                    if width >= minGapBins {
+                        gaps.append((start: gapStart % binCount, width: width))
+                    }
+                    gapStart = -1
+                }
+            }
+            i += 1
+        }
+        if gapStart != -1 {
+            let width = i - gapStart
+            if width >= minGapBins { gaps.append((start: gapStart % binCount, width: min(width, binCount))) }
+        }
+        // Deduplicate gaps that wrap around
+        if gaps.count > 1 {
+            var seen = Set<Int>()
+            gaps = gaps.filter { seen.insert($0.start).inserted }
+        }
+
+        // Stage 4: Score and select best gap
+        let aheadBin = binCount / 2  // π in extended = straight ahead
+        let goalBin: Int? = goalDirection.map { dir in
+            var rel = dir - userYaw
+            if rel > .pi { rel -= 2 * .pi }
+            if rel < -.pi { rel += 2 * .pi }
+            return Int((rel + .pi) / binWidth) % binCount
+        }
+
+        guard !gaps.isEmpty else {
+            // No viable gap — path is blocked
+            let urgency = ProximityLevel(from: nearestDist)
+            return VFHResult(bestDirection: 0, hapticDirection: .center,
+                             urgencyLevel: urgency, isBlocked: true, nearestObstacle: nearestDist)
+        }
+
+        var bestGap = gaps[0]
+        var bestScore: Float = -.greatestFiniteMagnitude
+
+        for gap in gaps {
+            let gapCenter = (gap.start + gap.width / 2) % binCount
+            let widthScore = Float(gap.width) / Float(binCount) * 0.3
+
+            // Proximity to straight ahead
+            let aheadDiff = min(abs(gapCenter - aheadBin), binCount - abs(gapCenter - aheadBin))
+            let aheadScore = (1.0 - Float(aheadDiff) / Float(binCount / 2)) * 0.3
+
+            // Proximity to goal
+            var goalScore: Float = 0
+            if let gb = goalBin {
+                let goalDiff = min(abs(gapCenter - gb), binCount - abs(gapCenter - gb))
+                goalScore = (1.0 - Float(goalDiff) / Float(binCount / 2)) * 0.4
+            } else {
+                goalScore = aheadScore * 0.4 / 0.3  // Default to ahead if no goal
+            }
+
+            let score = widthScore + aheadScore + goalScore
+            if score > bestScore { bestScore = score; bestGap = gap }
+        }
+
+        // Convert best gap center to direction angle
+        let bestCenter = (bestGap.start + bestGap.width / 2) % binCount
+        var bestAngle = Float(bestCenter) * binWidth - .pi  // [-π, π]
+
+        // Map to haptic direction
+        let haptic: HapticDirection
+        if bestAngle > -(.pi / 12) && bestAngle < .pi / 12 {
+            haptic = .center
+        } else if bestAngle >= .pi / 12 {
+            haptic = .right
+        } else {
+            haptic = .left
+        }
+
+        let urgency = ProximityLevel(from: nearestDist)
+        return VFHResult(bestDirection: bestAngle, hapticDirection: haptic,
+                         urgencyLevel: urgency, isBlocked: false, nearestObstacle: nearestDist)
+    }
+}
+
+/// Extension to create ProximityLevel from a distance value.
+private extension ProximityLevel {
+    init(from distance: Float) {
+        if distance < 0.5 { self = .veryHigh }
+        else if distance < 1.0 { self = .high }
+        else if distance < 2.0 { self = .medium }
+        else if distance < 3.0 { self = .low }
+        else if distance < 4.0 { self = .veryLow }
+        else { self = .none }
     }
 }
 
@@ -306,10 +689,20 @@ class NavigationCameraManager: NSObject, ObservableObject {
     private var lastLiDARStairTime: TimeInterval = 0
     private let lidarStairInterval: TimeInterval = 0.3  // Check stairs every 300ms
 
-    // Spatial map built from ARKit mesh reconstruction (like robotic vacuum mapping)
-    let spatialMap = SpatialMap()
-    private var lastSpatialMapUpdate: TimeInterval = 0
-    private let spatialMapInterval: TimeInterval = 0.5  // Update map every 500ms
+    // Robotics-grade spatial mapping pipeline (replaces old SpatialMap)
+    let depthProcessor = DepthProcessor()
+    let occupancyGrid = OccupancyGrid()
+    let vfhPlanner = VFHPlanner()
+
+    // Backward-compatible alias for any remaining consumers
+    var spatialMap: OccupancyGrid { occupancyGrid }
+
+    // VFH obstacle avoidance outputs
+    @Published var vfhSuggestedDirection: HapticDirection = .none
+    @Published var isPathBlocked: Bool = false
+
+    // Camera intrinsics for depth-to-world projection (stored each frame)
+    private var lastCameraIntrinsics: simd_float3x3 = matrix_identity_float3x3
     private var lastCameraTransform: simd_float4x4 = matrix_identity_float4x4
 
     let arSession = ARSession()
@@ -665,8 +1058,13 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
         arSession.delegate = self
         arSession.run(config, options: [.resetTracking])
-        spatialMap.reset()
-        DispatchQueue.main.async { self.isSessionRunning = true }
+        occupancyGrid.reset()
+        depthProcessor.reset()
+        DispatchQueue.main.async {
+            self.isSessionRunning = true
+            self.vfhSuggestedDirection = .none
+            self.isPathBlocked = false
+        }
 
         // Restart haptic engine if needed
         if !engineRunning {
@@ -701,6 +1099,8 @@ class NavigationCameraManager: NSObject, ObservableObject {
             self.dropOffDepth = 0
             self.devicePitch = 0
             self.isPhonePointingAtGround = false
+            self.vfhSuggestedDirection = .none
+            self.isPathBlocked = false
         }
     }
 
@@ -1092,8 +1492,9 @@ extension NavigationCameraManager: ARSessionDelegate {
         let buffer = frame.capturedImage
         let depth = frame.smoothedSceneDepth ?? frame.sceneDepth
 
-        // Store camera transform for spatial map processing
+        // Store camera transform and intrinsics for spatial mapping pipeline
         lastCameraTransform = frame.camera.transform
+        lastCameraIntrinsics = frame.camera.intrinsics
 
         // Extract device pitch from camera transform (eulerAngles.x)
         // In ARKit portrait mode: ~0 = phone upright, large negative = pointing at ground
@@ -1109,9 +1510,42 @@ extension NavigationCameraManager: ARSessionDelegate {
             if now - lastDepthAnalysisTime >= depthAnalysisInterval {
                 lastDepthAnalysisTime = now
                 isAnalyzingDepth = true
+                let camTransform = frame.camera.transform
+                let intrinsics = frame.camera.intrinsics
                 depthQueue.async { [weak self] in
                     guard let self = self else { return }
+
+                    // Original FOV-based depth analysis (5-zone)
                     self.analyzeDepthInFOVBox(d)
+
+                    // Robotics pipeline: process raw depth → clean depth → occupancy grid
+                    let depthMap = d.depthMap
+                    let (cleanDepth, validMask) = self.depthProcessor.process(depthMap)
+                    if !cleanDepth.isEmpty {
+                        let depthW = CVPixelBufferGetWidth(depthMap)
+                        let depthH = CVPixelBufferGetHeight(depthMap)
+                        self.occupancyGrid.updateFromDepth(
+                            cleanDepth: cleanDepth,
+                            validMask: validMask,
+                            cameraTransform: camTransform,
+                            intrinsics: intrinsics,
+                            depthWidth: depthW,
+                            depthHeight: depthH
+                        )
+
+                        // Run VFH obstacle avoidance on the updated grid
+                        let vfhResult = self.vfhPlanner.compute(
+                            grid: self.occupancyGrid,
+                            userX: self.occupancyGrid.userWorldX,
+                            userZ: self.occupancyGrid.userWorldZ,
+                            userYaw: self.occupancyGrid.userYaw,
+                            goalDirection: nil  // Goal direction wired from processFrame()
+                        )
+                        DispatchQueue.main.async {
+                            self.vfhSuggestedDirection = vfhResult.hapticDirection
+                            self.isPathBlocked = vfhResult.isBlocked
+                        }
+                    }
 
                     // Run LiDAR stair + drop-off detection at lower frequency (every 300ms)
                     if now - self.lastLiDARStairTime >= self.lidarStairInterval {
@@ -1122,14 +1556,6 @@ extension NavigationCameraManager: ARSessionDelegate {
 
                     self.isAnalyzingDepth = false
                 }
-            }
-        }
-
-        // Decay old spatial map data periodically
-        if now - lastSpatialMapUpdate >= spatialMapInterval {
-            lastSpatialMapUpdate = now
-            depthQueue.async { [weak self] in
-                self?.spatialMap.decayOldData(currentTimestamp: now)
             }
         }
 
@@ -1153,13 +1579,12 @@ extension NavigationCameraManager: ARSessionDelegate {
 
     private func processMeshAnchors(_ anchors: [ARAnchor]) {
         let cameraTransform = lastCameraTransform
-        let timestamp = CACurrentMediaTime()
 
         depthQueue.async { [weak self] in
             guard let self = self else { return }
             for anchor in anchors {
                 guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-                self.spatialMap.updateFromMesh(meshAnchor, cameraTransform: cameraTransform, timestamp: timestamp)
+                self.occupancyGrid.updateFromMesh(meshAnchor, cameraTransform: cameraTransform)
             }
         }
     }
