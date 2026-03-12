@@ -326,6 +326,8 @@ class OccupancyGrid {
                 }
             }
         }
+
+        recalculateCache()
     }
 
     // MARK: - Update from Mesh (Supplementary)
@@ -360,17 +362,32 @@ class OccupancyGrid {
                         toX: endGrid.x, toZ: endGrid.z)
             }
         }
+
+        recalculateCache()
     }
 
-    // MARK: - Directional Queries (backward-compatible with old SpatialMap)
+    // MARK: - Cached Directional Queries (performance-optimized)
+    // All cached values updated in a single O(2500) pass via recalculateCache()
 
-    /// Nearest occupied cell in an angular range from user's forward direction.
-    private func nearestOccupied(angleMin: Float, angleMax: Float) -> Float {
-        var nearest: Float = 999
+    private(set) var nearestFrontLeft: Float = 999
+    private(set) var nearestFrontRight: Float = 999
+    private(set) var nearestAhead: Float = 999
+    private(set) var dominantObstacleDirection: HapticDirection = .none
+    private(set) var occupiedCellCount: Int = 0
+
+    /// Single-pass cache update: computes all directional queries + cell count in one grid iteration.
+    /// Called at end of updateFromDepth() and updateFromMesh() instead of per-query.
+    private func recalculateCache() {
+        var nLeft: Float = 999, nRight: Float = 999, nAhead: Float = 999
+        var occCount = 0
+
         for gz in 0..<gridSize {
             for gx in 0..<gridSize {
                 let idx = gz * gridSize + gx
-                guard probability(at: idx) > occupiedProbThreshold else { continue }
+                let prob = probability(at: idx)
+                if prob > occupiedProbThreshold { occCount += 1 }
+                guard prob > occupiedProbThreshold else { continue }
+
                 let (wx, wz) = gridToWorld(gx, gz)
                 let dx = wx - userWorldX, dz = wz - userWorldZ
                 let dist = sqrt(dx * dx + dz * dz)
@@ -380,34 +397,32 @@ class OccupancyGrid {
                 if angle > .pi { angle -= 2 * .pi }
                 if angle < -.pi { angle += 2 * .pi }
 
-                if angle >= angleMin, angle <= angleMax {
-                    nearest = min(nearest, dist)
-                }
+                // Front-left: [-π/2, -0.05]
+                if angle >= -.pi / 2 && angle <= -0.05 { nLeft = min(nLeft, dist) }
+                // Front-right: [0.05, π/2]
+                if angle >= 0.05 && angle <= .pi / 2 { nRight = min(nRight, dist) }
+                // Ahead: [-π/6, π/6]
+                if angle >= -.pi / 6 && angle <= .pi / 6 { nAhead = min(nAhead, dist) }
             }
         }
-        return nearest
-    }
 
-    var nearestFrontLeft: Float { nearestOccupied(angleMin: -.pi / 2, angleMax: -0.05) }
-    var nearestFrontRight: Float { nearestOccupied(angleMin: 0.05, angleMax: .pi / 2) }
-    var nearestAhead: Float { nearestOccupied(angleMin: -.pi / 6, angleMax: .pi / 6) }
+        nearestFrontLeft = nLeft
+        nearestFrontRight = nRight
+        nearestAhead = nAhead
+        occupiedCellCount = occCount
 
-    var dominantObstacleDirection: HapticDirection {
-        let left = nearestFrontLeft, right = nearestFrontRight, ahead = nearestAhead
-        if ahead > halfExtent && left > halfExtent && right > halfExtent { return .none }
-        if ahead <= left && ahead <= right && ahead < halfExtent { return .center }
-        if left < right && left < halfExtent { return .left }
-        if right < halfExtent { return .right }
-        return .none
-    }
-
-    /// Number of cells with probability > 0.65 (occupied). Used for debugging and UI.
-    var occupiedCellCount: Int {
-        var count = 0
-        for i in 0..<(gridSize * gridSize) {
-            if probability(at: i) > occupiedProbThreshold { count += 1 }
+        // Compute dominant direction
+        if nAhead > halfExtent && nLeft > halfExtent && nRight > halfExtent {
+            dominantObstacleDirection = .none
+        } else if nAhead <= nLeft && nAhead <= nRight && nAhead < halfExtent {
+            dominantObstacleDirection = .center
+        } else if nLeft < nRight && nLeft < halfExtent {
+            dominantObstacleDirection = .left
+        } else if nRight < halfExtent {
+            dominantObstacleDirection = .right
+        } else {
+            dominantObstacleDirection = .none
         }
-        return count
     }
 
     /// Thread-safe copy of log-odds array for rendering on main thread (minimap).
@@ -424,6 +439,7 @@ struct VFHResult {
     let hapticDirection: HapticDirection
     let urgencyLevel: ProximityLevel
     let isBlocked: Bool
+    let isTooNarrow: Bool              // True when gaps exist but all are too narrow for human body
     let nearestObstacle: Float         // Distance to closest obstacle in any direction
 }
 
@@ -434,6 +450,7 @@ class VFHPlanner {
     private let lowThreshold: Float = 0.3
     private let minGapBins: Int = 3    // Minimum 30° gap for a person
     private let maxInfluence: Float = 4.0
+    private let minPassageWidth: Float = 0.7  // Human shoulder width (0.6m) + safety margin
     private var previousBlocked: [Bool]?
 
     /// Last computed VFH result — accessible for processFrame() to read nearestObstacle
@@ -530,15 +547,28 @@ class VFHPlanner {
             // No viable gap — path is blocked
             let urgency = ProximityLevel(from: nearestDist)
             let result = VFHResult(bestDirection: 0, hapticDirection: .center,
-                             urgencyLevel: urgency, isBlocked: true, nearestObstacle: nearestDist)
+                             urgencyLevel: urgency, isBlocked: true,
+                             isTooNarrow: false, nearestObstacle: nearestDist)
             lastResult = result
             return result
         }
 
         var bestGap = gaps[0]
         var bestScore: Float = -.greatestFiniteMagnitude
+        var hasPassableGap = false
 
         for gap in gaps {
+            // --- Human-width filter ---
+            // Calculate physical width of this gap at the nearest obstacle distance
+            let gapAngleRad = Float(gap.width) * binWidth
+            let effectiveDist = min(nearestDist, 3.0)  // Use nearest obstacle or cap at 3m
+            let gapWidthMeters = 2.0 * effectiveDist * sin(gapAngleRad / 2.0)
+            if gapWidthMeters < minPassageWidth {
+                if kDebugPipeline { print("[VFH] Gap at bin \(gap.start) width \(gap.width) = \(String(format: "%.2f", gapWidthMeters))m — TOO NARROW, skipping") }
+                continue  // Skip gaps too narrow for human passage
+            }
+            hasPassableGap = true
+
             let gapCenter = (gap.start + gap.width / 2) % binCount
             let widthScore = Float(gap.width) / Float(binCount) * 0.3
 
@@ -559,9 +589,20 @@ class VFHPlanner {
             if score > bestScore { bestScore = score; bestGap = gap }
         }
 
+        // All gaps exist but none are wide enough for a human body
+        guard hasPassableGap else {
+            let urgency = ProximityLevel(from: nearestDist)
+            let result = VFHResult(bestDirection: 0, hapticDirection: .center,
+                             urgencyLevel: urgency, isBlocked: true,
+                             isTooNarrow: true, nearestObstacle: nearestDist)
+            lastResult = result
+            if kDebugPipeline { print("[VFH] All \(gaps.count) gaps too narrow — path blocked (isTooNarrow)") }
+            return result
+        }
+
         // Convert best gap center to direction angle
         let bestCenter = (bestGap.start + bestGap.width / 2) % binCount
-        var bestAngle = Float(bestCenter) * binWidth - .pi  // [-π, π]
+        let bestAngle = Float(bestCenter) * binWidth - .pi  // [-π, π]
 
         // Map to haptic direction
         let haptic: HapticDirection
@@ -575,7 +616,8 @@ class VFHPlanner {
 
         let urgency = ProximityLevel(from: nearestDist)
         let result = VFHResult(bestDirection: bestAngle, hapticDirection: haptic,
-                         urgencyLevel: urgency, isBlocked: false, nearestObstacle: nearestDist)
+                         urgencyLevel: urgency, isBlocked: false,
+                         isTooNarrow: false, nearestObstacle: nearestDist)
         lastResult = result
         return result
     }
@@ -1728,10 +1770,13 @@ struct FullScreenARView: UIViewRepresentable {
     }
 
     // MARK: - Mesh Coordinator (ARSCNViewDelegate)
-    /// Renders ARMeshAnchor wireframes as color-coded SceneKit nodes.
-    /// Green = floor/walkable, Yellow = obstacle-height, Red = walls/tall obstacles.
+    /// Renders ARMeshAnchor wireframes with distance-based danger coloring.
+    /// Red = close/danger (<1m), Yellow = warning (1-2.5m), Green = safe (>2.5m).
+    /// Optimized: throttled rebuilds (1Hz), vertex decimation (max 500 per anchor).
     class MeshCoordinator: NSObject, ARSCNViewDelegate {
         var showMesh: Bool
+        private var lastMeshRebuildTime: [UUID: TimeInterval] = [:]
+        private let meshRebuildInterval: TimeInterval = 1.0  // Max 1 rebuild per anchor per second
 
         init(showMesh: Bool) {
             self.showMesh = showMesh
@@ -1743,32 +1788,52 @@ struct FullScreenARView: UIViewRepresentable {
             let node = SCNNode()
             node.name = "mesh_\(meshAnchor.identifier.uuidString)"
             node.isHidden = !showMesh
-            node.geometry = buildWireframeGeometry(from: meshAnchor)
+            let camTransform = renderer.pointOfView?.simdWorldTransform ?? matrix_identity_float4x4
+            node.geometry = buildWireframeGeometry(from: meshAnchor, cameraTransform: camTransform)
+            lastMeshRebuildTime[meshAnchor.identifier] = CACurrentMediaTime()
             return node
         }
 
         func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
             guard let meshAnchor = anchor as? ARMeshAnchor,
                   node.name?.hasPrefix("mesh_") == true else { return }
-            node.geometry = buildWireframeGeometry(from: meshAnchor)
+
+            // Throttle: skip rebuild if < 1.0s since last rebuild for this anchor
+            let now = CACurrentMediaTime()
+            if let lastTime = lastMeshRebuildTime[meshAnchor.identifier],
+               now - lastTime < meshRebuildInterval {
+                return
+            }
+            lastMeshRebuildTime[meshAnchor.identifier] = now
+
+            let camTransform = renderer.pointOfView?.simdWorldTransform ?? matrix_identity_float4x4
+            node.geometry = buildWireframeGeometry(from: meshAnchor, cameraTransform: camTransform)
             node.isHidden = !showMesh
         }
 
         func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                lastMeshRebuildTime.removeValue(forKey: meshAnchor.identifier)
+            }
             if node.name?.hasPrefix("mesh_") == true {
                 node.geometry = nil
             }
         }
 
-        /// Builds wireframe geometry from ARMeshAnchor with height-based coloring.
-        private func buildWireframeGeometry(from meshAnchor: ARMeshAnchor) -> SCNGeometry {
+        /// Builds decimated wireframe geometry with distance-based danger coloring.
+        /// Caps at ~500 vertices and ~1000 faces per anchor for performance.
+        private func buildWireframeGeometry(from meshAnchor: ARMeshAnchor, cameraTransform: simd_float4x4) -> SCNGeometry {
             let geometry = meshAnchor.geometry
             let vertices = geometry.vertices
             let faces = geometry.faces
             let vertexCount = vertices.count
             let faceCount = faces.count
 
-            // Extract vertex positions in local space
+            let cameraPos = simd_float3(cameraTransform.columns.3.x,
+                                         cameraTransform.columns.3.y,
+                                         cameraTransform.columns.3.z)
+
+            // Extract ALL vertex positions (needed for face indexing)
             var positions = [SCNVector3]()
             positions.reserveCapacity(vertexCount)
             for i in 0..<vertexCount {
@@ -1778,33 +1843,37 @@ struct FullScreenARView: UIViewRepresentable {
                 positions.append(SCNVector3(v.x, v.y, v.z))
             }
 
-            // Build colors based on height (Y coordinate in anchor-local space)
-            // Transform anchor-local Y to get world-relative height
-            let anchorY = meshAnchor.transform.columns.3.y
+            // Distance-based coloring: red = close danger, yellow = warning, green = safe
+            let meshTransform = meshAnchor.transform
             var colors = [SCNVector3]()
             colors.reserveCapacity(vertexCount)
             for i in 0..<vertexCount {
-                let worldY = positions[i].y + Float(anchorY)
-                // Classify by height relative to typical camera height (~1.5m)
-                // We use absolute world Y since floor is typically at Y ≈ 0
-                if worldY < 0.15 {
-                    // Floor/walkable (green)
-                    colors.append(SCNVector3(0.2, 0.9, 0.3))
-                } else if worldY < 1.0 {
-                    // Obstacle height — furniture, boxes (yellow)
-                    colors.append(SCNVector3(1.0, 0.85, 0.2))
+                let v = positions[i]
+                let worldPos = meshTransform * simd_float4(v.x, v.y, v.z, 1.0)
+                let dx = worldPos.x - cameraPos.x
+                let dz = worldPos.z - cameraPos.z
+                let dist = sqrt(dx * dx + dz * dz) // Horizontal distance
+
+                if dist < 1.0 {
+                    // Danger zone (red) — close to user
+                    colors.append(SCNVector3(1.0, 0.2, 0.15))
+                } else if dist < 2.5 {
+                    // Warning zone (yellow/orange)
+                    let t = (dist - 1.0) / 1.5 // 0 at 1m, 1 at 2.5m
+                    colors.append(SCNVector3(1.0, Float(0.3 + t * 0.55), Float(0.1 + t * 0.1)))
                 } else {
-                    // Wall/tall obstacle (red)
-                    colors.append(SCNVector3(1.0, 0.3, 0.2))
+                    // Safe zone (green)
+                    colors.append(SCNVector3(0.2, 0.85, 0.3))
                 }
             }
 
-            // Build line indices for wireframe from triangle faces
+            // Decimated face sampling: cap at ~1000 faces for wireframe
+            let faceStep = max(1, faceCount / 1000)
             var lineIndices = [UInt32]()
-            lineIndices.reserveCapacity(faceCount * 6) // 3 edges per face, 2 indices each
+            lineIndices.reserveCapacity(min(faceCount, 1000) * 6)
             let faceBytesPerIndex = faces.bytesPerIndex
 
-            for f in 0..<faceCount {
+            for f in Swift.stride(from: 0, to: faceCount, by: faceStep) {
                 let facePtr = faces.buffer.contents()
                     .advanced(by: f * faces.indexCountPerPrimitive * faceBytesPerIndex)
 
@@ -1819,7 +1888,6 @@ struct FullScreenARView: UIViewRepresentable {
                 }
 
                 guard idx.count == 3 else { continue }
-                // 3 edges: (0,1), (1,2), (2,0)
                 lineIndices.append(contentsOf: [idx[0], idx[1], idx[1], idx[2], idx[2], idx[0]])
             }
 

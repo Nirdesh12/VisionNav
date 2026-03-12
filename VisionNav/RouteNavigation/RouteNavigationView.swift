@@ -1210,10 +1210,12 @@ struct RouteNavigationView: View {
             )
 
             // VFH action-oriented voice guidance ("Step right", "Stop", etc.)
-            let vfhNearest = cameraManager.vfhPlanner.lastResult?.nearestObstacle ?? hapticDistance
+            let vfhResult = cameraManager.vfhPlanner.lastResult
+            let vfhNearest = vfhResult?.nearestObstacle ?? hapticDistance
             navigationModel.handleVFHVoiceGuidance(
                 vfhDirection: direction,
                 isBlocked: cameraManager.isPathBlocked,
+                isTooNarrow: vfhResult?.isTooNarrow ?? false,
                 nearestDistance: min(hapticDistance, vfhNearest)
             )
         }

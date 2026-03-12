@@ -149,7 +149,8 @@ class NavigationModel: NSObject, ObservableObject {
 
     // VFH-based action-oriented voice guidance
     private var lastVFHVoiceTime: Date = .distantPast
-    private let vfhVoiceCooldown: TimeInterval = 3.0  // Max one VFH voice command per 3 seconds
+    private let vfhVoiceCooldown: TimeInterval = 2.0  // Max one VFH voice command per 2 seconds
+    private var lastVFHSpokenDirection: HapticDirection = .none  // Track last spoken direction for change detection
 
     // Zone distances — updated each frame from processFrame for directional alerts
     private var currentLeftZoneDist: Float = 999
@@ -1195,10 +1196,11 @@ class NavigationModel: NSObject, ObservableObject {
 
     // MARK: - VFH Action-Oriented Voice Guidance
     /// Robot-style voice commands: "Step right", "Stop. Turn around" etc.
-    /// Only active in hapticWithCriticalVoice mode. Max one command per 3 seconds.
+    /// Extended range to 2.5m, direction change detection for immediate feedback.
     func handleVFHVoiceGuidance(
         vfhDirection: HapticDirection,
         isBlocked: Bool,
+        isTooNarrow: Bool,
         nearestDistance: Float
     ) {
         let feedbackMode = FeedbackMode(
@@ -1209,36 +1211,73 @@ class NavigationModel: NSObject, ObservableObject {
         guard feedbackMode != .hapticOnly else { return }
 
         let now = Date()
-        guard now.timeIntervalSince(lastVFHVoiceTime) > vfhVoiceCooldown else { return }
+        let timeSinceLast = now.timeIntervalSince(lastVFHVoiceTime)
+
+        // Allow immediate re-speak if direction changed (user needs to react fast)
+        let directionChanged = vfhDirection != lastVFHSpokenDirection
+            && vfhDirection != .none
+            && lastVFHSpokenDirection != .none
+        let cooldownMet = timeSinceLast > vfhVoiceCooldown
+        let urgentOverride = directionChanged && timeSinceLast > 0.8  // Min 0.8s between any speech
+
+        guard cooldownMet || urgentOverride else { return }
 
         var message: String?
         var priority: Int = 3
 
-        if isBlocked && nearestDistance < 1.0 {
+        // Priority 1: Path too narrow — special voice
+        if isTooNarrow {
+            message = "Path too narrow. Turn around"
+            priority = 5
+        }
+        // Priority 2: Fully blocked at close range
+        else if isBlocked && nearestDistance < 1.5 {
             message = "Stop. Turn around"
             priority = 5
-        } else if nearestDistance < 0.5 {
+        }
+        // Priority 3: Very close obstacle
+        else if nearestDistance < 0.5 {
             message = "Stop"
             priority = 5
-        } else if nearestDistance < 1.0 {
+        }
+        // Priority 4: Close range — clear directional commands
+        else if nearestDistance < 1.0 {
             switch vfhDirection {
-            case .left: message = "Step left"
-            case .right: message = "Step right"
-            case .center: message = "Obstacle close"
+            case .left: message = "Step left now"
+            case .right: message = "Step right now"
+            case .center: message = "Obstacle ahead, slow down"
             case .none: break
             }
             priority = 4
-        } else if nearestDistance < 1.5 && vfhDirection != .center && vfhDirection != .none {
+        }
+        // Priority 5: Medium range — directional guidance
+        else if nearestDistance < 1.8 {
             switch vfhDirection {
             case .left: message = "Move left"
             case .right: message = "Move right"
-            default: break
+            case .center: message = "Obstacle ahead"
+            case .none: break
             }
             priority = 3
+        }
+        // Priority 6: Extended range — early warning
+        else if nearestDistance < 2.5 && vfhDirection != .center && vfhDirection != .none {
+            switch vfhDirection {
+            case .left: message = "Bear left"
+            case .right: message = "Bear right"
+            default: break
+            }
+            priority = 2
+        }
+        // Priority 7: Clear path confirmation (only when direction changed to center)
+        else if nearestDistance >= 2.5 && directionChanged && vfhDirection == .center {
+            message = "Path clear"
+            priority = 1
         }
 
         if let msg = message {
             lastVFHVoiceTime = now
+            lastVFHSpokenDirection = vfhDirection
             DispatchQueue.main.async {
                 self.speak(msg, priority: priority)
             }
