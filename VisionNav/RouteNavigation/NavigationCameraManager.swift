@@ -12,6 +12,11 @@ import UIKit
 import Combine
 import CoreHaptics
 
+// MARK: - Pipeline Debug Flag
+/// Set to true to see [Pipeline] logs in Xcode console during testing.
+/// Set to false for production to avoid console spam.
+let kDebugPipeline = true
+
 // MARK: - Depth Processing Pipeline (Robotics-Standard)
 /// Processes raw LiDAR depth frames through statistical outlier removal,
 /// bilateral filtering, and temporal fusion for clean, stable depth data.
@@ -395,6 +400,20 @@ class OccupancyGrid {
         if right < halfExtent { return .right }
         return .none
     }
+
+    /// Number of cells with probability > 0.65 (occupied). Used for debugging and UI.
+    var occupiedCellCount: Int {
+        var count = 0
+        for i in 0..<(gridSize * gridSize) {
+            if probability(at: i) > occupiedProbThreshold { count += 1 }
+        }
+        return count
+    }
+
+    /// Thread-safe copy of log-odds array for rendering on main thread (minimap).
+    func snapshot() -> [Float] {
+        return logOdds
+    }
 }
 
 // MARK: - VFH Obstacle Avoidance (Humanoid Robot Style)
@@ -416,6 +435,9 @@ class VFHPlanner {
     private let minGapBins: Int = 3    // Minimum 30° gap for a person
     private let maxInfluence: Float = 4.0
     private var previousBlocked: [Bool]?
+
+    /// Last computed VFH result — accessible for processFrame() to read nearestObstacle
+    private(set) var lastResult: VFHResult?
 
     init() {}
 
@@ -507,8 +529,10 @@ class VFHPlanner {
         guard !gaps.isEmpty else {
             // No viable gap — path is blocked
             let urgency = ProximityLevel(from: nearestDist)
-            return VFHResult(bestDirection: 0, hapticDirection: .center,
+            let result = VFHResult(bestDirection: 0, hapticDirection: .center,
                              urgencyLevel: urgency, isBlocked: true, nearestObstacle: nearestDist)
+            lastResult = result
+            return result
         }
 
         var bestGap = gaps[0]
@@ -550,8 +574,10 @@ class VFHPlanner {
         }
 
         let urgency = ProximityLevel(from: nearestDist)
-        return VFHResult(bestDirection: bestAngle, hapticDirection: haptic,
+        let result = VFHResult(bestDirection: bestAngle, hapticDirection: haptic,
                          urgencyLevel: urgency, isBlocked: false, nearestObstacle: nearestDist)
+        lastResult = result
+        return result
     }
 }
 
@@ -701,6 +727,17 @@ class NavigationCameraManager: NSObject, ObservableObject {
     @Published var vfhSuggestedDirection: HapticDirection = .none
     @Published var isPathBlocked: Bool = false
 
+    // 3D mesh visualization toggle
+    @Published var showMeshOverlay: Bool = true
+
+    // Pipeline health tracking
+    private var consecutiveEmptyDepthFrames: Int = 0
+    @Published var depthPipelineActive: Bool = false
+
+    // Stair detection temporal debouncing
+    private var stairDetectionCount: Int = 0
+    private var lastStairDetectionFrame: TimeInterval = 0
+
     // Camera intrinsics for depth-to-world projection (stored each frame)
     private var lastCameraIntrinsics: simd_float3x3 = matrix_identity_float3x3
     private var lastCameraTransform: simd_float4x4 = matrix_identity_float4x4
@@ -817,7 +854,7 @@ class NavigationCameraManager: NSObject, ObservableObject {
         // Create repeating transient events
         var events: [CHHapticEvent] = []
         let interval = proximity.hapticInterval
-        let patternDuration: TimeInterval = 2.0
+        let patternDuration: TimeInterval = 0.5  // Shortened from 2.0s for responsive direction changes
         var time: TimeInterval = 0
 
         while time < patternDuration {
@@ -939,7 +976,7 @@ class NavigationCameraManager: NSObject, ObservableObject {
         if effectiveDirection == .center {
             interval = max(0.04, interval * 0.8)
         }
-        let patternDuration: TimeInterval = 2.0
+        let patternDuration: TimeInterval = 0.5  // Shortened from 2.0s for responsive direction changes
         var time: TimeInterval = 0
 
         while time < patternDuration {
@@ -1367,26 +1404,47 @@ class NavigationCameraManager: NSObject, ObservableObject {
                 smoothed.append(profile[s...e].reduce(0, +) / Float(e - s + 1))
             }
 
-            // Count regular depth transitions (step = 12-25cm)
+            // Count regular depth transitions (step = 14-24cm, tightened from 10-28cm)
             var steps = 0
             var lastIdx = -2
             for i in 1..<smoothed.count {
                 let change = abs(smoothed[i] - smoothed[i - 1])
-                if change >= 0.10 && change <= 0.28 && (i - lastIdx) >= 2 {
+                if change >= 0.14 && change <= 0.24 && (i - lastIdx) >= 2 {
                     steps += 1
                     lastIdx = i
                     nearestStairDepth = min(nearestStairDepth, smoothed[i])
                 }
             }
 
-            if steps >= 2 {
+            // Require 3+ steps per strip (up from 2 — single shelf edge no longer triggers)
+            if steps >= 3 {
                 stripsWithStairs += 1
                 totalSteps = max(totalSteps, steps)
             }
         }
 
-        // Confirm stairs if majority of strips detect step pattern
-        let detected = stripsWithStairs >= 3
+        // Require 4 of 5 strips to confirm (up from 3/5 — reduces false positives)
+        let rawDetected = stripsWithStairs >= 4
+
+        // Temporal debouncing: require 3 consecutive detections within 1.5s
+        let now = CACurrentMediaTime()
+        var detected = false
+        if rawDetected {
+            if now - lastStairDetectionFrame < 1.5 {
+                stairDetectionCount += 1
+            } else {
+                stairDetectionCount = 1
+            }
+            lastStairDetectionFrame = now
+            detected = stairDetectionCount >= 3
+        } else {
+            // Reset counter when no stairs detected
+            stairDetectionCount = 0
+        }
+
+        if kDebugPipeline && rawDetected {
+            print("[Pipeline] Stair raw: \(totalSteps) steps in \(stripsWithStairs)/5 strips, debounce count=\(stairDetectionCount)/3, confirmed=\(detected)")
+        }
 
         // Determine direction using depth curve analysis (same logic as YOLO-confirmed path)
         var direction: StairDirection = .unknown
@@ -1520,10 +1578,12 @@ extension NavigationCameraManager: ARSessionDelegate {
 
                     // Robotics pipeline: process raw depth → clean depth → occupancy grid
                     let depthMap = d.depthMap
+                    let depthW = CVPixelBufferGetWidth(depthMap)
+                    let depthH = CVPixelBufferGetHeight(depthMap)
                     let (cleanDepth, validMask) = self.depthProcessor.process(depthMap)
+
                     if !cleanDepth.isEmpty {
-                        let depthW = CVPixelBufferGetWidth(depthMap)
-                        let depthH = CVPixelBufferGetHeight(depthMap)
+                        self.consecutiveEmptyDepthFrames = 0
                         self.occupancyGrid.updateFromDepth(
                             cleanDepth: cleanDepth,
                             validMask: validMask,
@@ -1532,19 +1592,63 @@ extension NavigationCameraManager: ARSessionDelegate {
                             depthWidth: depthW,
                             depthHeight: depthH
                         )
-
-                        // Run VFH obstacle avoidance on the updated grid
-                        let vfhResult = self.vfhPlanner.compute(
-                            grid: self.occupancyGrid,
-                            userX: self.occupancyGrid.userWorldX,
-                            userZ: self.occupancyGrid.userWorldZ,
-                            userYaw: self.occupancyGrid.userYaw,
-                            goalDirection: nil  // Goal direction wired from processFrame()
-                        )
-                        DispatchQueue.main.async {
-                            self.vfhSuggestedDirection = vfhResult.hapticDirection
-                            self.isPathBlocked = vfhResult.isBlocked
+                    } else {
+                        // Fallback: use raw depth directly to keep grid alive
+                        self.consecutiveEmptyDepthFrames += 1
+                        if kDebugPipeline {
+                            print("[Pipeline] DepthProcessor returned empty (consecutive: \(self.consecutiveEmptyDepthFrames))")
                         }
+                        // Read raw depth and build simple valid mask
+                        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+                        if let base = CVPixelBufferGetBaseAddress(depthMap) {
+                            let bpr = CVPixelBufferGetBytesPerRow(depthMap)
+                            let count = depthW * depthH
+                            var rawDepth = [Float](repeating: 0, count: count)
+                            var rawValid = [Bool](repeating: false, count: count)
+                            let step = 8 // Sample every 8th pixel for fallback
+                            for py in Swift.stride(from: 0, to: depthH, by: step) {
+                                let row = base.advanced(by: py * bpr).assumingMemoryBound(to: Float32.self)
+                                for px in Swift.stride(from: 0, to: depthW, by: step) {
+                                    let dd = row[px]
+                                    let idx = py * depthW + px
+                                    if dd.isFinite && dd > 0.1 && dd < 6.0 {
+                                        rawDepth[idx] = dd
+                                        rawValid[idx] = true
+                                    }
+                                }
+                            }
+                            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+                            self.occupancyGrid.updateFromDepth(
+                                cleanDepth: rawDepth,
+                                validMask: rawValid,
+                                cameraTransform: camTransform,
+                                intrinsics: intrinsics,
+                                depthWidth: depthW,
+                                depthHeight: depthH
+                            )
+                        } else {
+                            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+                        }
+                    }
+
+                    // Run VFH obstacle avoidance on the updated grid
+                    let vfhResult = self.vfhPlanner.compute(
+                        grid: self.occupancyGrid,
+                        userX: self.occupancyGrid.userWorldX,
+                        userZ: self.occupancyGrid.userWorldZ,
+                        userYaw: self.occupancyGrid.userYaw,
+                        goalDirection: nil
+                    )
+
+                    if kDebugPipeline {
+                        let occ = self.occupancyGrid.occupiedCellCount
+                        print("[Pipeline] Grid: \(occ) occupied cells | VFH: \(vfhResult.hapticDirection.rawValue) blocked=\(vfhResult.isBlocked) nearest=\(String(format: "%.2f", vfhResult.nearestObstacle))m")
+                    }
+
+                    DispatchQueue.main.async {
+                        self.vfhSuggestedDirection = vfhResult.hapticDirection
+                        self.isPathBlocked = vfhResult.isBlocked
+                        self.depthPipelineActive = true
                     }
 
                     // Run LiDAR stair + drop-off detection at lower frequency (every 300ms)
@@ -1594,9 +1698,14 @@ extension NavigationCameraManager: ARSessionDelegate {
     }
 }
 
-// MARK: - Full Screen AR View
+// MARK: - Full Screen AR View with 3D Mesh Visualization
 struct FullScreenARView: UIViewRepresentable {
     let session: ARSession
+    let showMesh: Bool
+
+    func makeCoordinator() -> MeshCoordinator {
+        MeshCoordinator(showMesh: showMesh)
+    }
 
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView()
@@ -1604,8 +1713,149 @@ struct FullScreenARView: UIViewRepresentable {
         view.automaticallyUpdatesLighting = true
         view.backgroundColor = .black
         view.contentMode = .scaleAspectFill
+        view.delegate = context.coordinator
         return view
     }
 
-    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        context.coordinator.showMesh = showMesh
+        // Toggle visibility of all mesh nodes
+        uiView.scene.rootNode.enumerateChildNodes { node, _ in
+            if node.name?.hasPrefix("mesh_") == true {
+                node.isHidden = !showMesh
+            }
+        }
+    }
+
+    // MARK: - Mesh Coordinator (ARSCNViewDelegate)
+    /// Renders ARMeshAnchor wireframes as color-coded SceneKit nodes.
+    /// Green = floor/walkable, Yellow = obstacle-height, Red = walls/tall obstacles.
+    class MeshCoordinator: NSObject, ARSCNViewDelegate {
+        var showMesh: Bool
+
+        init(showMesh: Bool) {
+            self.showMesh = showMesh
+            super.init()
+        }
+
+        func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+            guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
+            let node = SCNNode()
+            node.name = "mesh_\(meshAnchor.identifier.uuidString)"
+            node.isHidden = !showMesh
+            node.geometry = buildWireframeGeometry(from: meshAnchor)
+            return node
+        }
+
+        func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+            guard let meshAnchor = anchor as? ARMeshAnchor,
+                  node.name?.hasPrefix("mesh_") == true else { return }
+            node.geometry = buildWireframeGeometry(from: meshAnchor)
+            node.isHidden = !showMesh
+        }
+
+        func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
+            if node.name?.hasPrefix("mesh_") == true {
+                node.geometry = nil
+            }
+        }
+
+        /// Builds wireframe geometry from ARMeshAnchor with height-based coloring.
+        private func buildWireframeGeometry(from meshAnchor: ARMeshAnchor) -> SCNGeometry {
+            let geometry = meshAnchor.geometry
+            let vertices = geometry.vertices
+            let faces = geometry.faces
+            let vertexCount = vertices.count
+            let faceCount = faces.count
+
+            // Extract vertex positions in local space
+            var positions = [SCNVector3]()
+            positions.reserveCapacity(vertexCount)
+            for i in 0..<vertexCount {
+                let ptr = vertices.buffer.contents()
+                    .advanced(by: vertices.offset + i * vertices.stride)
+                let v = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                positions.append(SCNVector3(v.x, v.y, v.z))
+            }
+
+            // Build colors based on height (Y coordinate in anchor-local space)
+            // Transform anchor-local Y to get world-relative height
+            let anchorY = meshAnchor.transform.columns.3.y
+            var colors = [SCNVector3]()
+            colors.reserveCapacity(vertexCount)
+            for i in 0..<vertexCount {
+                let worldY = positions[i].y + Float(anchorY)
+                // Classify by height relative to typical camera height (~1.5m)
+                // We use absolute world Y since floor is typically at Y ≈ 0
+                if worldY < 0.15 {
+                    // Floor/walkable (green)
+                    colors.append(SCNVector3(0.2, 0.9, 0.3))
+                } else if worldY < 1.0 {
+                    // Obstacle height — furniture, boxes (yellow)
+                    colors.append(SCNVector3(1.0, 0.85, 0.2))
+                } else {
+                    // Wall/tall obstacle (red)
+                    colors.append(SCNVector3(1.0, 0.3, 0.2))
+                }
+            }
+
+            // Build line indices for wireframe from triangle faces
+            var lineIndices = [UInt32]()
+            lineIndices.reserveCapacity(faceCount * 6) // 3 edges per face, 2 indices each
+            let faceBytesPerIndex = faces.bytesPerIndex
+
+            for f in 0..<faceCount {
+                let facePtr = faces.buffer.contents()
+                    .advanced(by: f * faces.indexCountPerPrimitive * faceBytesPerIndex)
+
+                var idx = [UInt32]()
+                for vi in 0..<faces.indexCountPerPrimitive {
+                    let indexPtr = facePtr.advanced(by: vi * faceBytesPerIndex)
+                    if faceBytesPerIndex == 4 {
+                        idx.append(indexPtr.assumingMemoryBound(to: UInt32.self).pointee)
+                    } else {
+                        idx.append(UInt32(indexPtr.assumingMemoryBound(to: UInt16.self).pointee))
+                    }
+                }
+
+                guard idx.count == 3 else { continue }
+                // 3 edges: (0,1), (1,2), (2,0)
+                lineIndices.append(contentsOf: [idx[0], idx[1], idx[1], idx[2], idx[2], idx[0]])
+            }
+
+            // Create geometry sources
+            let posSource = SCNGeometrySource(vertices: positions)
+            let colorSource = SCNGeometrySource(
+                data: Data(bytes: colors, count: colors.count * MemoryLayout<SCNVector3>.stride),
+                semantic: .color,
+                vectorCount: colors.count,
+                usesFloatComponents: true,
+                componentsPerVector: 3,
+                bytesPerComponent: MemoryLayout<Float>.stride,
+                dataOffset: 0,
+                dataStride: MemoryLayout<SCNVector3>.stride
+            )
+
+            // Create line element
+            let indexData = Data(bytes: lineIndices, count: lineIndices.count * MemoryLayout<UInt32>.stride)
+            let element = SCNGeometryElement(
+                data: indexData,
+                primitiveType: .line,
+                primitiveCount: lineIndices.count / 2,
+                bytesPerIndex: MemoryLayout<UInt32>.stride
+            )
+
+            let scnGeometry = SCNGeometry(sources: [posSource, colorSource], elements: [element])
+
+            // Wireframe material: unlit, 60% opacity
+            let material = SCNMaterial()
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            material.diffuse.contents = UIColor.white.withAlphaComponent(0.6)
+            material.fillMode = .lines
+            scnGeometry.materials = [material]
+
+            return scnGeometry
+        }
+    }
 }

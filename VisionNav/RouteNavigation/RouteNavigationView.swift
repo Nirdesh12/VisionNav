@@ -335,7 +335,7 @@ struct RouteNavigationView: View {
 
         return ZStack {
             // AR Camera
-            FullScreenARView(session: cameraManager.arSession)
+            FullScreenARView(session: cameraManager.arSession, showMesh: cameraManager.showMeshOverlay)
 
             // Segmentation mask overlay
             segmentationOverlay(geometry: geometry)
@@ -363,6 +363,41 @@ struct RouteNavigationView: View {
             if cameraManager.currentProximity != .none {
                 proximityIndicator
             }
+
+            // Pipeline debug overlay (top-left corner)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(cameraManager.depthPipelineActive ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                    Text("Grid: \(cameraManager.occupancyGrid.occupiedCellCount)")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white)
+                }
+                Text("VFH: \(cameraManager.isPathBlocked ? "BLOCKED" : cameraManager.vfhSuggestedDirection.rawValue.uppercased())")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(cameraManager.isPathBlocked ? .red : .cyan)
+                Text("Depth: \(cameraManager.depthPipelineActive ? "OK" : "EMPTY")")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(cameraManager.depthPipelineActive ? .green : .red)
+            }
+            .padding(6)
+            .background(Color.black.opacity(0.6))
+            .cornerRadius(6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.leading, 8)
+            .padding(.top, 50)
+
+            // 2D Occupancy Grid Minimap (bottom-right corner)
+            OccupancyMinimapView(
+                occupancyGrid: cameraManager.occupancyGrid,
+                vfhDirection: cameraManager.vfhSuggestedDirection,
+                isBlocked: cameraManager.isPathBlocked
+            )
+            .frame(width: 120, height: 120)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .padding(.trailing, 12)
+            .padding(.bottom, 80)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Camera view with obstacle detection")
@@ -1157,17 +1192,29 @@ struct RouteNavigationView: View {
             if cameraManager.isPathBlocked {
                 // All directions blocked — signal center urgency
                 direction = .center
-                hapticDistance = min(hapticDistance, gridAheadDist)
+                let vfhNearest = cameraManager.vfhPlanner.lastResult?.nearestObstacle ?? 999
+                hapticDistance = min(hapticDistance, vfhNearest)
             } else if vfhDirection != .none && vfhDirection != direction {
-                // VFH found a better gap — blend with current if VFH is more urgent
-                if gridAheadDist < 2.5 || hapticDistance < 2.0 {
-                    direction = vfhDirection
+                // VFH has computed a preferred safe direction — trust it (no distance gate)
+                direction = vfhDirection
+                // Use VFH's nearest obstacle distance if closer
+                let vfhNearest = cameraManager.vfhPlanner.lastResult?.nearestObstacle ?? 999
+                if vfhNearest < hapticDistance {
+                    hapticDistance = vfhNearest
                 }
             }
 
             cameraManager.updateDirectionalHaptics(
                 forDistance: hapticDistance,
                 direction: direction
+            )
+
+            // VFH action-oriented voice guidance ("Step right", "Stop", etc.)
+            let vfhNearest = cameraManager.vfhPlanner.lastResult?.nearestObstacle ?? hapticDistance
+            navigationModel.handleVFHVoiceGuidance(
+                vfhDirection: direction,
+                isBlocked: cameraManager.isPathBlocked,
+                nearestDistance: min(hapticDistance, vfhNearest)
             )
         }
 
@@ -1489,6 +1536,117 @@ class VoiceInputManager: ObservableObject {
             }
         }
         return result
+    }
+}
+
+// MARK: - 2D Occupancy Grid Minimap
+/// Top-down view of the Bayesian occupancy grid showing explored areas,
+/// obstacles, and the VFH suggested direction. Renders at 4Hz with processFrame.
+struct OccupancyMinimapView: View {
+    let occupancyGrid: OccupancyGrid
+    let vfhDirection: HapticDirection
+    let isBlocked: Bool
+
+    var body: some View {
+        Canvas { context, size in
+            let gridSize = occupancyGrid.gridSize
+            let cellW = size.width / CGFloat(gridSize)
+            let cellH = size.height / CGFloat(gridSize)
+
+            // Get log-odds snapshot
+            let logOdds = occupancyGrid.snapshot()
+
+            // Draw each cell
+            for gz in 0..<gridSize {
+                for gx in 0..<gridSize {
+                    let idx = gz * gridSize + gx
+                    let lo = logOdds[idx]
+                    let prob = 1.0 / (1.0 + exp(-lo))
+
+                    let color: Color
+                    if abs(lo) < 0.1 {
+                        // Unknown (near zero log-odds)
+                        color = Color(white: 0.15)
+                    } else if prob < 0.35 {
+                        // Free space (green)
+                        let intensity = max(0.2, 1.0 - Double(prob) / 0.35)
+                        color = Color(red: 0.1, green: intensity * 0.7, blue: 0.1)
+                    } else if prob > 0.65 {
+                        // Occupied (red)
+                        let intensity = min(1.0, (Double(prob) - 0.65) / 0.35 + 0.5)
+                        color = Color(red: intensity, green: 0.15, blue: 0.1)
+                    } else {
+                        // Uncertain (dark gray-yellow)
+                        color = Color(red: 0.3, green: 0.3, blue: 0.15)
+                    }
+
+                    let rect = CGRect(
+                        x: CGFloat(gx) * cellW,
+                        y: CGFloat(gridSize - 1 - gz) * cellH, // Flip Z for top-down
+                        width: cellW + 0.5,
+                        height: cellH + 0.5
+                    )
+                    context.fill(Path(rect), with: .color(color))
+                }
+            }
+
+            // Draw user position (blue triangle at center)
+            let centerX = size.width / 2
+            let centerY = size.height / 2
+            let triSize: CGFloat = 8
+
+            // Rotate triangle based on user yaw (relative to grid)
+            let yaw = CGFloat(occupancyGrid.userYaw)
+            var triangle = Path()
+            // Triangle pointing in yaw direction
+            let tipX = centerX + sin(yaw) * triSize
+            let tipY = centerY - cos(yaw) * triSize
+            let leftX = centerX + sin(yaw + 2.4) * triSize * 0.6
+            let leftY = centerY - cos(yaw + 2.4) * triSize * 0.6
+            let rightX = centerX + sin(yaw - 2.4) * triSize * 0.6
+            let rightY = centerY - cos(yaw - 2.4) * triSize * 0.6
+            triangle.move(to: CGPoint(x: tipX, y: tipY))
+            triangle.addLine(to: CGPoint(x: leftX, y: leftY))
+            triangle.addLine(to: CGPoint(x: rightX, y: rightY))
+            triangle.closeSubpath()
+            context.fill(triangle, with: .color(.cyan))
+
+            // Draw VFH direction indicator
+            if vfhDirection != .none {
+                let dirAngle: CGFloat
+                switch vfhDirection {
+                case .left: dirAngle = yaw - .pi / 4
+                case .right: dirAngle = yaw + .pi / 4
+                case .center: dirAngle = yaw
+                case .none: dirAngle = yaw
+                }
+                let arrowLen: CGFloat = 15
+                let arrowEnd = CGPoint(
+                    x: centerX + sin(dirAngle) * arrowLen,
+                    y: centerY - cos(dirAngle) * arrowLen
+                )
+                var arrow = Path()
+                arrow.move(to: CGPoint(x: centerX, y: centerY))
+                arrow.addLine(to: arrowEnd)
+                context.stroke(
+                    arrow,
+                    with: .color(isBlocked ? .red : .green),
+                    lineWidth: 2
+                )
+            }
+
+            // "MAP" label
+            context.draw(
+                Text("MAP").font(.system(size: 8, weight: .bold)).foregroundColor(.white),
+                at: CGPoint(x: size.width / 2, y: 6)
+            )
+        }
+        .background(Color.black.opacity(0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.4), lineWidth: 1)
+        )
     }
 }
 

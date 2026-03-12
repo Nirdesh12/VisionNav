@@ -109,8 +109,12 @@ class NavigationModel: NSObject, ObservableObject {
     @Published var stairCount: Int = 0
     @Published var stairDirection: StairDirection = .unknown
 
+    // Cross-validation: tracks whether YOLO currently sees stairs (set in processFrame)
+    var yoloStairsActive: Bool = false
+
     private var visionModel: VNCoreMLModel?
-    private let confidenceThreshold: Float = 0.4
+    private let confidenceThreshold: Float = 0.55  // Raised from 0.4 to reduce false positives
+    private let minStairBBoxArea: CGFloat = 0.008  // Minimum 0.8% of frame area for stair detections
     private let processingQueue = DispatchQueue(label: "detection", qos: .userInitiated)
     private var isProcessing: Bool = false
     private var lastAlertTime: Date = .distantPast
@@ -142,6 +146,10 @@ class NavigationModel: NSObject, ObservableObject {
 
     // Device pitch — used to suppress ground-plane false obstacle alerts
     var devicePitch: Float = 0  // radians, set from ARFrame.camera.eulerAngles.x
+
+    // VFH-based action-oriented voice guidance
+    private var lastVFHVoiceTime: Date = .distantPast
+    private let vfhVoiceCooldown: TimeInterval = 3.0  // Max one VFH voice command per 3 seconds
 
     // Zone distances — updated each frame from processFrame for directional alerts
     private var currentLeftZoneDist: Float = 999
@@ -323,8 +331,12 @@ class NavigationModel: NSObject, ObservableObject {
                     }
                 }
                 if name.contains("stair") || name.contains("steps") {
-                    foundStairs = true
-                    stairsBBox = obs.boundingBox
+                    // Minimum bbox size filter for stairs (reduces false positives from small detections)
+                    let stairArea = obs.boundingBox.width * obs.boundingBox.height
+                    if stairArea >= minStairBBoxArea {
+                        foundStairs = true
+                        stairsBBox = obs.boundingBox
+                    }
                 }
                 if isWithinFOV(obs.boundingBox) {
                     fovResults.append(detection)
@@ -412,6 +424,9 @@ class NavigationModel: NSObject, ObservableObject {
                 self.tactilePavingDirection = .none
             }
         }
+
+        // Track YOLO stair detection for cross-validation with LiDAR
+        yoloStairsActive = foundStairs
 
         // Analyze stairs with LiDAR
         if foundStairs, let box = stairsBBox {
@@ -1120,8 +1135,10 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - LiDAR Stair Detection Handler (YOLO-independent)
-    /// Processes LiDAR-only stair detection as a safety fallback when YOLO misses stairs.
+    // MARK: - LiDAR Stair Detection Handler (cross-validated with YOLO)
+    /// Processes LiDAR stair detection with cross-validation against YOLO.
+    /// LiDAR-only requires 3 consecutive debounced frames (handled in camera manager).
+    /// When YOLO also sees stairs, we trust LiDAR faster.
     func handleLiDARStairDetection(
         lidarDetected: Bool, lidarCount: Int,
         lidarDirection: StairDirection, lidarDistance: Float
@@ -1130,10 +1147,7 @@ class NavigationModel: NSObject, ObservableObject {
         if stairsDetected { return }
 
         let now = Date()
-        guard lidarDetected else {
-            // Only clear LiDAR stair state if YOLO also doesn't see stairs
-            return
-        }
+        guard lidarDetected else { return }
 
         guard now.timeIntervalSince(lastStairAlertTime) > stairCooldown else { return }
         lastStairAlertTime = now
@@ -1176,6 +1190,58 @@ class NavigationModel: NSObject, ObservableObject {
             let alert = NavigationAlert(message: message, alertType: .danger, priority: priority)
             self.currentAlert = alert
             self.speak(message, priority: priority)
+        }
+    }
+
+    // MARK: - VFH Action-Oriented Voice Guidance
+    /// Robot-style voice commands: "Step right", "Stop. Turn around" etc.
+    /// Only active in hapticWithCriticalVoice mode. Max one command per 3 seconds.
+    func handleVFHVoiceGuidance(
+        vfhDirection: HapticDirection,
+        isBlocked: Bool,
+        nearestDistance: Float
+    ) {
+        let feedbackMode = FeedbackMode(
+            rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
+        ) ?? .hapticWithCriticalVoice
+
+        // Only speak in voice-enabled modes
+        guard feedbackMode != .hapticOnly else { return }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastVFHVoiceTime) > vfhVoiceCooldown else { return }
+
+        var message: String?
+        var priority: Int = 3
+
+        if isBlocked && nearestDistance < 1.0 {
+            message = "Stop. Turn around"
+            priority = 5
+        } else if nearestDistance < 0.5 {
+            message = "Stop"
+            priority = 5
+        } else if nearestDistance < 1.0 {
+            switch vfhDirection {
+            case .left: message = "Step left"
+            case .right: message = "Step right"
+            case .center: message = "Obstacle close"
+            case .none: break
+            }
+            priority = 4
+        } else if nearestDistance < 1.5 && vfhDirection != .center && vfhDirection != .none {
+            switch vfhDirection {
+            case .left: message = "Move left"
+            case .right: message = "Move right"
+            default: break
+            }
+            priority = 3
+        }
+
+        if let msg = message {
+            lastVFHVoiceTime = now
+            DispatchQueue.main.async {
+                self.speak(msg, priority: priority)
+            }
         }
     }
 
