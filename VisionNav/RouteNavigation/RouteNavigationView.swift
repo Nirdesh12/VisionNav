@@ -1160,14 +1160,13 @@ struct RouteNavigationView: View {
         if feedbackMode != .voiceOnly {
             // Primary: depth-based direction from FOV analysis
             var direction: HapticDirection
-            // pathClear = center zone beyond 1.5m (sides ignored).
-            // cameraSeesObstacle = depth OR YOLO detects something close.
-            // Only let grid/VFH fire when the live sensor data agrees there is something there.
-            let cameraSeesObstacle = !cameraManager.pathClear ||
-                (!navigationModel.yoloCenterClear) ||
-                cameraManager.nearestObstacleDistance < 1.5
+            // cameraSeesObstacle: CENTRE-based only.
+            // pathClear = center depth ≥ 1.5m. yoloCenterClear = no obstacle in center 40% frame.
+            // nearestObstacleDistance is NOT included here — it carries side-zone bleed (wall at
+            // 0.9m on your left) which must never trigger grid/VFH overrides on a clear path.
+            let cameraSeesObstacle = !cameraManager.pathClear || !navigationModel.yoloCenterClear
 
-            // Use 999 when nothing detected — prevents stale side readings raising proximity level
+            // Use 999 when nothing detected — prevents side-bleed readings raising proximity level
             var hapticDistance: Float = cameraSeesObstacle ? cameraManager.nearestObstacleDistance : 999
             switch cameraManager.obstacleDirection {
             case "left":   direction = .left
@@ -1251,11 +1250,15 @@ struct RouteNavigationView: View {
             )
 
             // VFH action-oriented voice guidance ("Step right", "Stop", etc.)
+            // Only blend in vfhNearest when the live camera agrees there is an obstacle.
+            // When cameraSeesObstacle==false, hapticDistance==999 and vfhNearest can be a
+            // stale 0.3m grid cell — min(999, 0.3)=0.3 would falsely trigger "Stop!".
+            let voiceNearestDist: Float = cameraSeesObstacle ? min(hapticDistance, vfhNearest) : hapticDistance
             navigationModel.handleVFHVoiceGuidance(
                 vfhDirection: direction,
                 isBlocked: confirmedBlocked,
                 isTooNarrow: vfhResult?.isTooNarrow ?? false,
-                nearestDistance: min(hapticDistance, vfhNearest)
+                nearestDistance: voiceNearestDist
             )
         }
 
