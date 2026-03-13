@@ -148,6 +148,8 @@ class NavigationModel: NSObject, ObservableObject {
     private let pathClearCooldown: TimeInterval = 5.0   // Say "safe to proceed" at most every 5s
     private let stairCooldown: TimeInterval = 4.0
     private let dropOffCooldown: TimeInterval = 3.0
+    private let doorCooldown: TimeInterval = 8.0         // Announce same door at most every 8s
+    private var lastDoorAnnouncedTime: Date = .distantPast
     private var lastEmergencyAlertTime: Date = .distantPast
     private var lastDropOffAlertTime: Date = .distantPast
     /// Stair detection lingers for this many seconds after YOLO last saw stairs.
@@ -453,6 +455,19 @@ class NavigationModel: NSObject, ObservableObject {
                     self.stairCount = 0
                     self.stairDirection = .unknown
                 }
+            }
+        }
+
+        // Door detection — announce once with an 8s cooldown so it's not spammy
+        let doorResult = allResults.first { $0.label.lowercased().contains("door") }
+        if let door = doorResult,
+           Date().timeIntervalSince(lastDoorAnnouncedTime) > doorCooldown {
+            lastDoorAnnouncedTime = Date()
+            let bb = door.boundingBox
+            let pos = bb.midX < 0.38 ? "to your left" : (bb.midX > 0.62 ? "to your right" : "ahead")
+            let distStr = door.distance.map { ", \(Int($0)) meter\($0 < 1.5 ? "" : "s") away" } ?? ""
+            DispatchQueue.main.async {
+                self.speak("Door \(pos)\(distStr)", priority: 2)
             }
         }
 
@@ -1075,9 +1090,8 @@ class NavigationModel: NSObject, ObservableObject {
         }
 
         // === Progressive distance callouts with directional guidance ===
-        // Only speak when something is within 1.5m — matches the new 1.0m FOV threshold
-        // with a small buffer so guidance starts slightly before the hard limit.
-        if obstacleInFOV && nearestDistance < 1.5 {
+        // Only speak when something is within 1.0m — actual obstacle in immediate path.
+        if obstacleInFOV && nearestDistance < 1.0 {
             let suggestedDir = suggestAvoidanceDirection(
                 obstacleDir: obstacleDirection,
                 leftDist: leftZoneDistance,
@@ -1098,29 +1112,12 @@ class NavigationModel: NSObject, ObservableObject {
                 message = "Very close! Move \(suggestedDir) now"
                 priority = 4
                 cooldown = dangerCooldown
-            } else if nearestDistance < 1.0 {
+            } else {
+                // 0.5m – 1.0m: obstacle within arm's reach
                 currentBand = 3
                 message = "Obstacle close, move \(suggestedDir)"
                 priority = 3
                 cooldown = dangerCooldown
-            } else if nearestDistance < 2.0 {
-                currentBand = 2
-                switch obstacleDirection {
-                case "left": message = "Something on your left, move \(suggestedDir)"
-                case "right": message = "Something on your right, move \(suggestedDir)"
-                default: message = "Obstacle ahead, move \(suggestedDir)"
-                }
-                priority = 2
-                cooldown = warningCooldown
-            } else {
-                currentBand = 1
-                switch obstacleDirection {
-                case "left": message = "Something approaching from your left"
-                case "right": message = "Something approaching from your right"
-                default: message = "Obstacle ahead, move \(suggestedDir)"
-                }
-                priority = 1
-                cooldown = fovAlertCooldown
             }
 
             // Band stability: require multiple consecutive frames in same band before announcing
@@ -1141,8 +1138,8 @@ class NavigationModel: NSObject, ObservableObject {
             lastAnnouncedDistanceBand = currentBand
             consecutiveBandFrames = 0
 
-            // Check if path is completely blocked (all zones < 1.5m)
-            let allZonesBlocked = leftZoneDistance < 1.5 && centerZoneDistance < 1.5 && rightZoneDistance < 1.5
+            // Check if path is completely blocked (all zones < 1.0m)
+            let allZonesBlocked = leftZoneDistance < 1.0 && centerZoneDistance < 1.0 && rightZoneDistance < 1.0
 
             DispatchQueue.main.async {
                 let alertType: NavigationAlert.AlertType = nearestDistance < 1.0 ? .danger : .warning

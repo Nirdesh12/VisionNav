@@ -194,6 +194,15 @@ class OccupancyGrid {
         isInitialized = false
     }
 
+    /// Decay all cells toward "unknown" so dynamic obstacles (people, moved furniture) fade out.
+    /// Call every ~3 seconds. A factor of 0.90 reduces a fully occupied cell to threshold in ~12s.
+    func decay(factor: Float = 0.90) {
+        for i in 0..<logOdds.count {
+            logOdds[i] *= factor
+        }
+        recalculateCache()
+    }
+
     // MARK: - Coordinate Conversion
 
     func worldToGrid(_ wx: Float, _ wz: Float) -> (x: Int, z: Int)? {
@@ -770,6 +779,7 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
     private var lastLiDARStairTime: TimeInterval = 0
     private let lidarStairInterval: TimeInterval = 0.3  // Check stairs every 300ms
+    private var lastGridDecayTime: TimeInterval = 0     // Grid decay every 3s to clear dynamic obstacles
 
     // Robotics-grade spatial mapping pipeline (replaces old SpatialMap)
     let depthProcessor = DepthProcessor()
@@ -1742,6 +1752,13 @@ extension NavigationCameraManager: ARSessionDelegate {
                         self.lastLiDARStairTime = now
                         self.detectStairsFromLiDAR(d)
                         self.detectDropOff(d)
+                    }
+
+                    // Decay occupancy grid every 3s so dynamic obstacles (people, moved chairs)
+                    // fade out and don't permanently block paths they've left.
+                    if now - self.lastGridDecayTime >= 3.0 {
+                        self.lastGridDecayTime = now
+                        self.occupancyGrid.decay()
                     }
 
                     self.isAnalyzingDepth = false

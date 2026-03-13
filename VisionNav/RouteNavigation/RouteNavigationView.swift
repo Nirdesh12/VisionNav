@@ -1193,7 +1193,10 @@ struct RouteNavigationView: View {
             let vfhDirection = cameraManager.vfhSuggestedDirection
             let vfhResult = cameraManager.vfhPlanner.lastResult  // hoisted here so [MERGE] debug can read it
             let vfhNearest = vfhResult?.nearestObstacle ?? 999
-            if cameraManager.isPathBlocked {
+            // Only trust isPathBlocked when the live camera also confirms an obstacle.
+            // Stale grid cells from a prior scan must not override a clear camera view.
+            let confirmedBlocked = cameraManager.isPathBlocked && !cameraManager.pathClear
+            if confirmedBlocked {
                 // All directions blocked — signal center urgency
                 direction = .center
                 hapticDistance = min(hapticDistance, vfhNearest)
@@ -1255,7 +1258,7 @@ struct RouteNavigationView: View {
             // VFH action-oriented voice guidance ("Step right", "Stop", etc.)
             navigationModel.handleVFHVoiceGuidance(
                 vfhDirection: direction,
-                isBlocked: cameraManager.isPathBlocked,
+                isBlocked: confirmedBlocked,
                 isTooNarrow: vfhResult?.isTooNarrow ?? false,
                 nearestDistance: min(hapticDistance, vfhNearest)
             )
