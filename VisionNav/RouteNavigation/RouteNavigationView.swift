@@ -1160,7 +1160,9 @@ struct RouteNavigationView: View {
         if feedbackMode != .voiceOnly {
             // Primary: depth-based direction from FOV analysis
             var direction: HapticDirection
-            var hapticDistance = cameraManager.nearestObstacleDistance
+            // When pathClear, camera confirmed nothing within 1m — use 999 so stale distances
+            // from side-zone bleed can't drive hapticDistance into the "high" proximity range.
+            var hapticDistance: Float = cameraManager.pathClear ? 999 : cameraManager.nearestObstacleDistance
             switch cameraManager.obstacleDirection {
             case "left":   direction = .left
             case "right":  direction = .right
@@ -1176,16 +1178,18 @@ struct RouteNavigationView: View {
             let gridRightDist = grid.nearestFrontRight
             let gridAheadDist = grid.nearestAhead
 
-            // Only use the occupancy grid when it shows something DIRECTLY AHEAD within 1.5m.
-            // Stale side-wall cells in the grid must not override a clear forward FOV reading —
-            // that is what was causing "obstacle ahead" with green mesh in front.
-            let gridNearest = min(gridLeftDist, min(gridRightDist, gridAheadDist))
-            if direction == .none && gridDirection != .none && gridAheadDist < 1.5 {
-                direction = gridDirection
-                hapticDistance = gridAheadDist
-            } else if direction != .none && gridAheadDist < hapticDistance && gridAheadDist < 1.5 {
-                direction = gridDirection
-                hapticDistance = gridAheadDist
+            // Only use the occupancy grid when the live camera ALSO shows the path is not clear.
+            // If pathClear==true the camera already confirmed nothing within 1m — stale grid
+            // cells (214 remembered from a prior scan) must NOT override that.
+            // This is the same guard we apply to VFH below.
+            if !cameraManager.pathClear {
+                if direction == .none && gridDirection != .none && gridAheadDist < 1.5 {
+                    direction = gridDirection
+                    hapticDistance = gridAheadDist
+                } else if direction != .none && gridAheadDist < hapticDistance && gridAheadDist < 1.5 {
+                    direction = gridDirection
+                    hapticDistance = gridAheadDist
+                }
             }
 
             // Override with VFH steering when path is blocked or VFH suggests a turn
