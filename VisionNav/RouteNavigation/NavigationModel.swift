@@ -1094,8 +1094,11 @@ class NavigationModel: NSObject, ObservableObject {
         // The ground surface reads as a close "obstacle" — filter it out.
         if phonePointingAtGround && nearestDistance > 0.3 { return }
 
-        // === EMERGENCY STOP: < 0.3m ===
-        if nearestDistance < 0.3 && nearestDistance > 0.05 {
+        // === EMERGENCY STOP: centre zone < 0.3m ===
+        // Use centerZoneDistance, NOT nearestDistance. nearestDistance = overallMin which
+        // includes side-zone bleed — a wall 0.2m to your left fires "Stop!" even when the
+        // path ahead is completely clear. Only stop when the centre is genuinely blocked.
+        if centerZoneDistance < 0.3 && centerZoneDistance > 0.05 {
             guard now.timeIntervalSince(lastEmergencyAlertTime) > emergencyCooldown else { return }
             lastEmergencyAlertTime = now
             lastAnnouncedDistanceBand = 4
