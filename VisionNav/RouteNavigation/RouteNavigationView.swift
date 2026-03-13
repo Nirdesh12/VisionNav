@@ -1160,9 +1160,15 @@ struct RouteNavigationView: View {
         if feedbackMode != .voiceOnly {
             // Primary: depth-based direction from FOV analysis
             var direction: HapticDirection
-            // When pathClear, camera confirmed nothing within 1m — use 999 so stale distances
-            // from side-zone bleed can't drive hapticDistance into the "high" proximity range.
-            var hapticDistance: Float = cameraManager.pathClear ? 999 : cameraManager.nearestObstacleDistance
+            // pathClear = center zone beyond 1.5m (sides ignored).
+            // cameraSeesObstacle = depth OR YOLO detects something close.
+            // Only let grid/VFH fire when the live sensor data agrees there is something there.
+            let cameraSeesObstacle = !cameraManager.pathClear ||
+                (!navigationModel.yoloCenterClear) ||
+                cameraManager.nearestObstacleDistance < 1.5
+
+            // Use 999 when nothing detected — prevents stale side readings raising proximity level
+            var hapticDistance: Float = cameraSeesObstacle ? cameraManager.nearestObstacleDistance : 999
             switch cameraManager.obstacleDirection {
             case "left":   direction = .left
             case "right":  direction = .right
@@ -1170,49 +1176,34 @@ struct RouteNavigationView: View {
             default:       direction = .none
             }
 
-            // Augment with occupancy grid: accumulated map detects obstacles
-            // outside current camera view (previously seen, approaching from side)
+            // Occupancy grid — only trust when live sensor also reports an obstacle
             let grid = cameraManager.occupancyGrid
             let gridDirection = grid.dominantObstacleDirection
             let gridLeftDist = grid.nearestFrontLeft
             let gridRightDist = grid.nearestFrontRight
             let gridAheadDist = grid.nearestAhead
 
-            // Only use the occupancy grid when the live camera ALSO shows the path is not clear.
-            // If pathClear==true the camera already confirmed nothing within 1m — stale grid
-            // cells (214 remembered from a prior scan) must NOT override that.
-            // This is the same guard we apply to VFH below.
-            if !cameraManager.pathClear {
+            if cameraSeesObstacle {
                 if direction == .none && gridDirection != .none && gridAheadDist < 1.5 {
                     direction = gridDirection
-                    hapticDistance = gridAheadDist
+                    hapticDistance = min(hapticDistance, gridAheadDist)
                 } else if direction != .none && gridAheadDist < hapticDistance && gridAheadDist < 1.5 {
                     direction = gridDirection
                     hapticDistance = gridAheadDist
                 }
             }
 
-            // Override with VFH steering when path is blocked or VFH suggests a turn
-            // VFH provides the safest navigable gap direction (humanoid-robot style)
+            // VFH planner — only trust when live sensor confirms something nearby
             let vfhDirection = cameraManager.vfhSuggestedDirection
-            let vfhResult = cameraManager.vfhPlanner.lastResult  // hoisted here so [MERGE] debug can read it
+            let vfhResult = cameraManager.vfhPlanner.lastResult
             let vfhNearest = vfhResult?.nearestObstacle ?? 999
-            // Only trust isPathBlocked when the live camera also confirms an obstacle.
-            // Stale grid cells from a prior scan must not override a clear camera view.
-            let confirmedBlocked = cameraManager.isPathBlocked && !cameraManager.pathClear
+            let confirmedBlocked = cameraManager.isPathBlocked && cameraSeesObstacle
             if confirmedBlocked {
-                // All directions blocked — signal center urgency
                 direction = .center
                 hapticDistance = min(hapticDistance, vfhNearest)
-            } else if vfhDirection != .none && vfhNearest < 1.5 && !cameraManager.pathClear {
-                // Only trust VFH steering when:
-                //   1. VFH reports an obstacle within 1.5m (grid data is fresh/close)
-                //   2. Camera FOV also confirms path is NOT clear (not stale scan)
-                // This prevents scanned wall geometry from overriding a clear live camera view.
+            } else if vfhDirection != .none && vfhNearest < 1.5 && cameraSeesObstacle {
                 direction = vfhDirection
-                if vfhNearest < hapticDistance {
-                    hapticDistance = vfhNearest
-                }
+                if vfhNearest < hapticDistance { hapticDistance = vfhNearest }
             }
 
             // ── 🧭 Navigation Decision Summary (plain English, once per second) ──

@@ -108,6 +108,9 @@ class NavigationModel: NSObject, ObservableObject {
     @Published var stairsDetected: Bool = false
     @Published var stairCount: Int = 0
     @Published var stairDirection: StairDirection = .unknown
+    /// True when YOLO sees no obstacle-class object in the center 40% of the frame.
+    /// Used alongside depth to confirm the path is really clear.
+    @Published var yoloCenterClear: Bool = true
 
     // Cross-validation: tracks whether YOLO currently sees stairs (set in processFrame)
     var yoloStairsActive: Bool = false
@@ -145,7 +148,7 @@ class NavigationModel: NSObject, ObservableObject {
     private let dangerCooldown: TimeInterval = 2.5
     private let warningCooldown: TimeInterval = 4.0
     private let fovAlertCooldown: TimeInterval = 4.0
-    private let pathClearCooldown: TimeInterval = 5.0   // Say "safe to proceed" at most every 5s
+    private let pathClearCooldown: TimeInterval = 2.0   // Say "path clear" at most every 2s
     private let stairCooldown: TimeInterval = 4.0
     private let dropOffCooldown: TimeInterval = 3.0
     private let doorCooldown: TimeInterval = 8.0         // Announce same door at most every 8s
@@ -458,16 +461,35 @@ class NavigationModel: NSObject, ObservableObject {
             }
         }
 
+        // YOLO center-clear flag: true when no obstacle-class object occupies the
+        // center 40% of the frame (x: 0.30–0.70). Used to cross-validate depth readings.
+        let yoloCenterObstacle = allResults.contains { det in
+            det.isObstacle && det.confidence >= confidenceThreshold &&
+            det.boundingBox.midX >= 0.30 && det.boundingBox.midX <= 0.70
+        }
+        DispatchQueue.main.async { self.yoloCenterClear = !yoloCenterObstacle }
+
         // Door detection — announce once with an 8s cooldown so it's not spammy
         let doorResult = allResults.first { $0.label.lowercased().contains("door") }
         if let door = doorResult,
            Date().timeIntervalSince(lastDoorAnnouncedTime) > doorCooldown {
             lastDoorAnnouncedTime = Date()
             let bb = door.boundingBox
-            let pos = bb.midX < 0.38 ? "to your left" : (bb.midX > 0.62 ? "to your right" : "ahead")
-            let distStr = door.distance.map { ", \(Int($0)) meter\($0 < 1.5 ? "" : "s") away" } ?? ""
+            let distStr: String
+            if let d = door.distance {
+                let meters = Int(d.rounded())
+                distStr = meters <= 1 ? ", about 1 meter away" : ", about \(meters) meters away"
+            } else { distStr = "" }
+            let doorMsg: String
+            if bb.midX < 0.35 {
+                doorMsg = "There is a door to your left\(distStr)"
+            } else if bb.midX > 0.65 {
+                doorMsg = "There is a door to your right\(distStr)"
+            } else {
+                doorMsg = "There is a door directly in front of you\(distStr)"
+            }
             DispatchQueue.main.async {
-                self.speak("Door \(pos)\(distStr)", priority: 2)
+                self.speak(doorMsg, priority: 2)
             }
         }
 
@@ -1090,8 +1112,13 @@ class NavigationModel: NSObject, ObservableObject {
         }
 
         // === Progressive distance callouts with directional guidance ===
-        // Only speak when something is within 1.0m — actual obstacle in immediate path.
-        if obstacleInFOV && nearestDistance < 1.0 {
+        // Primary trigger: center zone blocked (1.5m threshold).
+        // Also triggers if YOLO camera sees an obstacle in the center even if depth is borderline.
+        let centerBlocked = centerZoneDistance < 1.5
+        let yoloSaysBlocked = !yoloCenterClear && centerZoneDistance < 2.0
+
+        if centerBlocked || yoloSaysBlocked {
+            let effectiveDist = centerBlocked ? centerZoneDistance : nearestDistance
             let suggestedDir = suggestAvoidanceDirection(
                 obstacleDir: obstacleDirection,
                 leftDist: leftZoneDistance,
@@ -1101,26 +1128,33 @@ class NavigationModel: NSObject, ObservableObject {
                 userHeading: userHeading
             )
 
-            // Determine distance band for progressive callouts — ALWAYS include direction
+            // Three distance bands — each has its own urgency and message
             let currentBand: Int
             let message: String
             let priority: Int
             let cooldown: TimeInterval
 
-            if nearestDistance < 0.5 {
+            if effectiveDist < 0.5 {
+                // DANGER — less than half a metre
                 currentBand = 4
-                message = "Very close! Move \(suggestedDir) now"
+                message = "Stop! Very close, move \(suggestedDir) immediately"
+                priority = 5
+                cooldown = dangerCooldown
+            } else if effectiveDist < 1.0 {
+                // Close — within arm's reach
+                currentBand = 3
+                message = "Obstacle close, move \(suggestedDir)"
                 priority = 4
                 cooldown = dangerCooldown
             } else {
-                // 0.5m – 1.0m: obstacle within arm's reach
-                currentBand = 3
-                message = "Obstacle close, move \(suggestedDir)"
+                // Early warning — 1.0–1.5m ahead, time to steer
+                currentBand = 2
+                message = "Obstacle ahead, turn \(suggestedDir)"
                 priority = 3
-                cooldown = dangerCooldown
+                cooldown = warningCooldown
             }
 
-            // Band stability: require multiple consecutive frames in same band before announcing
+            // Band stability: require multiple consecutive frames before announcing
             if currentBand != lastAnnouncedDistanceBand {
                 consecutiveBandFrames += 1
                 if consecutiveBandFrames < bandStabilityRequired && currentBand < 3 {
@@ -1138,43 +1172,38 @@ class NavigationModel: NSObject, ObservableObject {
             lastAnnouncedDistanceBand = currentBand
             consecutiveBandFrames = 0
 
-            // Check if path is completely blocked (all zones < 1.0m)
-            let allZonesBlocked = leftZoneDistance < 1.0 && centerZoneDistance < 1.0 && rightZoneDistance < 1.0
+            // Completely blocked when all three zones are within 1.5m
+            let allZonesBlocked = leftZoneDistance < 1.5 && centerZoneDistance < 1.5 && rightZoneDistance < 1.5
 
             DispatchQueue.main.async {
-                let alertType: NavigationAlert.AlertType = nearestDistance < 1.0 ? .danger : .warning
+                let alertType: NavigationAlert.AlertType = effectiveDist < 1.0 ? .danger : .warning
                 let alert = NavigationAlert(message: message, alertType: alertType, priority: priority)
                 self.currentAlert = alert
 
-                // Voice gating based on feedback mode
                 switch feedbackMode {
                 case .voiceOnly, .hapticWithCriticalVoice:
-                    // Speak for all obstacle bands (2m and closer) so the user always
-                    // hears which direction to go. "hapticOnly" mode keeps silence here
-                    // since handleVFHVoiceGuidance is also gated by hapticOnly.
-                    if priority >= 2 || allZonesBlocked {
-                        let voiceMessage = allZonesBlocked
-                            ? "Path blocked, please turn around"
-                            : message
-                        self.speak(voiceMessage, priority: priority)
-                    }
+                    let voiceMessage = allZonesBlocked
+                        ? "Path blocked, please turn around"
+                        : message
+                    self.speak(voiceMessage, priority: priority)
                 case .hapticOnly:
-                    break  // Vibration only, no voice
+                    break
                 }
             }
-        } else if pathClear && nearestDistance >= 1.0 {
+
+        } else if pathClear && yoloCenterClear {
+            // Both depth AND camera confirm nothing in the path — announce promptly
             guard now.timeIntervalSince(lastPathClearTime) > pathClearCooldown else { return }
-            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 2.0 else { return }
+            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 1.5 else { return }
 
             lastPathClearTime = now
             lastFOVAlertMessage = ""
             lastAnnouncedDistanceBand = 0
             consecutiveBandFrames = 0
 
-            // "Safe to proceed" in all non-haptic modes
             if feedbackMode != .hapticOnly {
                 DispatchQueue.main.async {
-                    self.speak("Safe to proceed", priority: 1)
+                    self.speak("Path is clear, go ahead", priority: 1)
                 }
             }
         }
@@ -1280,31 +1309,29 @@ class NavigationModel: NSObject, ObservableObject {
             message = "Stop! Very close obstacle"
             priority = 5
 
-        // ── Very close (< 1.0m) — shout the direction ────────────────────────
+        // ── Very close (< 1.0m) — urgent turn command ────────────────────────
         } else if nearestDistance < 1.0 {
             switch vfhDirection {
-            case .left:   message = "Go left now"
-            case .right:  message = "Go right now"
-            case .center: message = "Slow down, obstacle directly ahead"
+            case .left:   message = "Turn left now"
+            case .right:  message = "Turn right now"
+            case .center: message = "Stop! Obstacle directly ahead"
             case .none:   break
             }
-            priority = 5   // highest so it cuts through any queued speech
+            priority = 5
 
-        // ── Close (1.0m–1.5m) — clear spoken direction ───────────────────────
-        // Capped at 1.5m: beyond this the occupancy grid may have stale scan data
-        // and we don't want false "move left/right" when the live camera shows clear.
+        // ── 1.0m–1.5m — clear directional guidance ───────────────────────────
         } else if nearestDistance < 1.5 {
             switch vfhDirection {
-            case .left:   message = "Move to the left"
-            case .right:  message = "Move to the right"
-            case .center: message = "Obstacle ahead, move aside"
+            case .left:   message = "Steer left"
+            case .right:  message = "Steer right"
+            case .center: message = "Obstacle ahead, please move aside"
             case .none:   break
             }
             priority = 4
 
-        // ── Path just became clear ────────────────────────────────────────────
+        // ── Path just cleared ─────────────────────────────────────────────────
         } else if directionChanged && vfhDirection == .center {
-            message = "Path clear, continue ahead"
+            message = "Path is clear, go ahead"
             priority = 2
         }
 
