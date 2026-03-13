@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "VisionNav (iOS Simulator)",
+      "runtimeExecutable": "xcodebuild",
+      "runtimeArgs": [
+        "-scheme", "VisionNav",
+        "-destination", "platform=iOS Simulator,name=iPhone 16 Pro",
+        "-configuration", "Debug",
+        "build"
+      ],
+      "port": 0
+    }
+  ]
+}
