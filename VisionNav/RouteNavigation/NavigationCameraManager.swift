@@ -566,12 +566,16 @@ class VFHPlanner {
 
         for gap in gaps {
             // --- Human-width filter ---
-            // Calculate physical width of this gap at the nearest obstacle distance
+            // How wide is this gap physically?
+            // We measure at whichever is closer: the real nearest obstacle or 2m reference.
+            // Floor at 2.0m: a nearby side wall must not shrink gaps that point a clear direction.
             let gapAngleRad = Float(gap.width) * binWidth
-            let effectiveDist = min(nearestDist, 3.0)  // Use nearest obstacle or cap at 3m
+            let effectiveDist = max(min(nearestDist, 4.0), 2.0)  // clamp 2m–4m
             let gapWidthMeters = 2.0 * effectiveDist * sin(gapAngleRad / 2.0)
             if gapWidthMeters < minPassageWidth {
-                if kDebugPipeline { print("[VFH] Gap at bin \(gap.start) width \(gap.width) = \(String(format: "%.2f", gapWidthMeters))m — TOO NARROW, skipping") }
+                if kDebugPipeline {
+                    print("🚫 Opening too small to walk through (\(String(format: "%.1f", gapWidthMeters))m wide, need \(minPassageWidth)m) — skipping this direction")
+                }
                 continue  // Skip gaps too narrow for human passage
             }
             hasPassableGap = true
@@ -603,7 +607,7 @@ class VFHPlanner {
                              urgencyLevel: urgency, isBlocked: true,
                              isTooNarrow: true, nearestObstacle: nearestDist)
             lastResult = result
-            if kDebugPipeline { print("[VFH] All \(gaps.count) gaps too narrow — path blocked (isTooNarrow)") }
+            if kDebugPipeline { print("⚠️ Found \(gaps.count) opening(s) but all too tight to walk through — telling user to turn around") }
             return result
         }
 
@@ -978,9 +982,14 @@ class NavigationCameraManager: NSObject, ObservableObject {
         // Only update if proximity or direction changed
         guard newProximity != currentProximity || direction != currentHapticDirection else { return }
 
-        // ── [HAPTIC] Debug ────────────────────────────────────────────────────
+        // ── 📳 Vibration Triggered ────────────────────────────────────────────
         if kDebugObstacle {
-            print("[HAPTIC] Fired → direction:\(direction.rawValue)  proximity:\(newProximity)  dist:\(String(format: "%.2f", distance))m  (was dir:\(currentHapticDirection.rawValue) prox:\(currentProximity))")
+            let urgencyWords: [ProximityLevel: String] = [
+                .veryHigh: "DANGER — very fast buzz (< 0.5m)", .high: "urgent buzz (< 1.0m)",
+                .medium: "medium buzz (< 2.0m)", .low: "light buzz (< 3.0m)",
+                .veryLow: "gentle tap (< 4.0m)", .none: "no buzz"
+            ]
+            print("📳 Vibrating: obstacle on \(direction.rawValue.uppercased()) at \(String(format: "%.1f", distance))m → \(urgencyWords[newProximity] ?? "")")
         }
         // ─────────────────────────────────────────────────────────────────────
 
@@ -1008,30 +1017,27 @@ class NavigationCameraManager: NSObject, ObservableObject {
         }
     }
 
-    /// Builds a CoreHaptics pattern where direction is encoded through sharpness:
-    /// - Left obstacle: sharpness 0.3 (soft/dull feel)
-    /// - Right obstacle: sharpness 0.8 (sharp/crisp feel)
-    /// - Center obstacle: sharpness 0.5 (neutral) with tighter pulse interval
+    /// Builds a proximity-only CoreHaptics pattern.
+    /// Direction is communicated via voice ("go left", "move right") — NOT encoded in vibration feel.
+    /// Intensity and pulse speed reflect how close the obstacle is; sharpness is always neutral.
     private func playCoreDirectionalPattern(engine: CHHapticEngine, proximity: ProximityLevel, direction: HapticDirection) {
         stopContinuousHaptic()
-
-        // At very high proximity (<0.5m), override to center/urgent feel
-        let effectiveDirection = proximity == .veryHigh ? HapticDirection.center : direction
 
         let intensity = CHHapticEventParameter(
             parameterID: .hapticIntensity, value: proximity.hapticIntensity
         )
+        // Fixed neutral sharpness — direction is spoken, not felt
         let sharpness = CHHapticEventParameter(
-            parameterID: .hapticSharpness, value: effectiveDirection.sharpnessValue
+            parameterID: .hapticSharpness, value: 0.5
         )
 
         var events: [CHHapticEvent] = []
         var interval = proximity.hapticInterval
-        // Center obstacles get a slightly tighter interval for urgency
-        if effectiveDirection == .center {
+        // Tighten pulse for very close obstacles (danger feel)
+        if proximity >= .high {
             interval = max(0.04, interval * 0.8)
         }
-        let patternDuration: TimeInterval = 0.5  // Shortened from 2.0s for responsive direction changes
+        let patternDuration: TimeInterval = 0.5
         var time: TimeInterval = 0
 
         while time < patternDuration {
@@ -1293,18 +1299,18 @@ class NavigationCameraManager: NSObject, ObservableObject {
             direction = "none"
         }
 
-        // ── [FOV-ZONE] Debug ─────────────────────────────────────────────────
+        // ── 📷 Camera Depth Reading (plain English) ─────────────────────────
         if kDebugObstacle {
-            let fl = String(format: "%.2f", minDistFarLeft)
-            let l  = String(format: "%.2f", minDistLeft)
-            let c  = String(format: "%.2f", minDistCenter)
-            let r  = String(format: "%.2f", minDistRight)
-            let fr = String(format: "%.2f", minDistFarRight)
-            let om = String(format: "%.2f", overallMin)
-            let sm = String(format: "%.2f", sideMin)
-            print("[FOV-ZONE] farL:\(fl)m  L:\(l)m  CENTER:\(c)m  R:\(r)m  farR:\(fr)m")
-            print("[FOV-ZONE] overallMin:\(om)m  sideMin:\(sm)m  → direction:\(direction)  obstacle:\(hasObstacle)  pathClear:\(isPathClear)")
-            print("[FOV-ZONE] Thresholds — warning:\(warningThreshold)m  side_trigger:2.0m  clear:2.5m")
+            func dist(_ v: Float) -> String { v > 9 ? "clear" : "\(String(format: "%.1f", v))m" }
+            print("📷 What the camera sees:")
+            print("   Far left: \(dist(minDistFarLeft))  |  Left: \(dist(minDistLeft))  |  STRAIGHT AHEAD: \(dist(minDistCenter))  |  Right: \(dist(minDistRight))  |  Far right: \(dist(minDistFarRight))")
+            print("   Closest thing in path: \(dist(overallMin))   Closest to sides: \(dist(sideMin))")
+            if isPathClear {
+                print("   ✅ Path looks clear — no obstacles detected")
+            } else {
+                print("   🚧 Something detected → blocking direction: \(direction == "none" ? "nothing yet" : direction.uppercased())")
+                print("   (Triggers alert if straight-ahead < \(warningThreshold)m or sides < 2.0m)")
+            }
         }
         // ─────────────────────────────────────────────────────────────────────
 

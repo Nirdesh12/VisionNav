@@ -156,8 +156,8 @@ class NavigationModel: NSObject, ObservableObject {
 
     // VFH-based action-oriented voice guidance
     private var lastVFHVoiceTime: Date = .distantPast
-    private let vfhVoiceCooldown: TimeInterval = 2.0  // Max one VFH voice command per 2 seconds
-    private var lastVFHSpokenDirection: HapticDirection = .none  // Track last spoken direction for change detection
+    private let vfhVoiceCooldown: TimeInterval = 1.5  // Repeat same direction at most every 1.5s
+    private var lastVFHSpokenDirection: HapticDirection = .none  // Track last spoken direction
 
     // Zone distances — updated each frame from processFrame for directional alerts
     private var currentLeftZoneDist: Float = 999
@@ -450,28 +450,30 @@ class NavigationModel: NSObject, ObservableObject {
         allResults.sort { ($0.distance ?? 999) < ($1.distance ?? 999) }
         fovResults.sort { ($0.distance ?? 999) < ($1.distance ?? 999) }
 
-        // ── [YOLO] Debug (throttled to 1 print per second) ───────────────────
+        // ── 🤖 AI Object Detection (plain English, once per second) ─────────
         if kDebugYOLO {
             let now = Date()
             if now.timeIntervalSince(lastYOLODebugTime) >= 1.0 {
                 lastYOLODebugTime = now
                 if allResults.isEmpty {
-                    print("[YOLO] No detections this frame (conf threshold: \(confidenceThreshold))")
+                    print("🤖 AI sees nothing right now  (min confidence required: \(Int(confidenceThreshold * 100))%)")
                 } else {
-                    print("[YOLO] ── \(allResults.count) detection(s) ──────────────────────────")
+                    print("🤖 AI detected \(allResults.count) thing(s):")
                     for d in allResults {
                         let bb = d.boundingBox
-                        let depthStr = d.distance.map { String(format: "%.2fm", $0) } ?? "no depth"
-                        let inFOV = fovResults.contains { $0.id == d.id } ? "✓ IN-FOV" : "  out-fov"
-                        let role = d.isObstacle ? "OBSTACLE" : (d.isGuidance ? "guidance" : "other   ")
-                        // BBox in Vision coords: origin=bottom-left, y increases upward
-                        print(String(format: "[YOLO]   %@ %@  conf:%.0f%%  bbox(x:%.2f y:%.2f w:%.2f h:%.2f)  depth:%@",
-                                     inFOV, role,
-                                     d.confidence * 100,
-                                     bb.origin.x, bb.origin.y, bb.width, bb.height,
-                                     depthStr))
+                        let depthStr = d.distance.map { "\(String(format: "%.1f", $0))m away" } ?? "distance unknown"
+                        let inPath = fovResults.contains { $0.id == d.id } ? "✅ IN YOUR PATH" : "  outside path"
+                        let role = d.isObstacle ? "⛔ OBSTACLE" : (d.isGuidance ? "🟡 guidance marker" : "ℹ️  background item")
+                        // Bounding box: x/y are position (0=left/bottom, 1=right/top), w/h are size fraction
+                        let posDesc = bb.midX < 0.33 ? "left side" : (bb.midX > 0.66 ? "right side" : "center")
+                        print("   \(inPath)  \(role): \(d.label)  (\(Int(d.confidence * 100))% sure)  \(depthStr)  position: \(posDesc)  size: \(Int(bb.width * 100))% × \(Int(bb.height * 100))% of screen")
                     }
-                    print("[YOLO]   FOV obstacles: \(fovResults.filter{$0.isObstacle}.count)  minDist: \(String(format: "%.2f", minDist))m")
+                    let obstaclesInPath = fovResults.filter { $0.isObstacle }.count
+                    if obstaclesInPath > 0 {
+                        print("   ⚠️  \(obstaclesInPath) obstacle(s) directly in walking path — closest: \(String(format: "%.1f", minDist))m")
+                    } else {
+                        print("   ✅ No obstacles in direct walking path")
+                    }
                 }
             }
         }
@@ -1228,9 +1230,10 @@ class NavigationModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - VFH Action-Oriented Voice Guidance
-    /// Robot-style voice commands: "Step right", "Stop. Turn around" etc.
-    /// Extended range to 2.5m, direction change detection for immediate feedback.
+    // MARK: - Voice Direction Guidance
+    /// Speaks direction and distance to the user.
+    /// Since haptic no longer encodes left/right (just proximity buzz), ALL directional
+    /// information now comes through voice. This runs more aggressively than before.
     func handleVFHVoiceGuidance(
         vfhDirection: HapticDirection,
         isBlocked: Bool,
@@ -1241,72 +1244,68 @@ class NavigationModel: NSObject, ObservableObject {
             rawValue: UserDefaults.standard.string(forKey: "feedbackMode") ?? ""
         ) ?? .hapticWithCriticalVoice
 
-        // Only speak in voice-enabled modes
         guard feedbackMode != .hapticOnly else { return }
 
         let now = Date()
         let timeSinceLast = now.timeIntervalSince(lastVFHVoiceTime)
 
-        // Allow immediate re-speak if direction changed (user needs to react fast)
-        let directionChanged = vfhDirection != lastVFHSpokenDirection
-            && vfhDirection != .none
-            && lastVFHSpokenDirection != .none
-        let cooldownMet = timeSinceLast > vfhVoiceCooldown
-        let urgentOverride = directionChanged && timeSinceLast > 0.8  // Min 0.8s between any speech
+        // Direction changed → speak almost immediately (0.4s min gap to avoid audio overlap)
+        let directionChanged = vfhDirection != lastVFHSpokenDirection && vfhDirection != .none
+        let cooldownMet      = timeSinceLast > vfhVoiceCooldown          // normal repeat cooldown
+        let dirChangeSpeech  = directionChanged && timeSinceLast > 0.4   // fast on direction flip
 
-        guard cooldownMet || urgentOverride else { return }
+        guard cooldownMet || dirChangeSpeech else { return }
 
         var message: String?
         var priority: Int = 3
 
-        // Priority 1: Path too narrow — special voice
+        // ── Danger / blocked ─────────────────────────────────────────────────
         if isTooNarrow {
-            message = "Path too narrow. Turn around"
+            // All openings too tight to walk through
+            message = "No room to pass. Please turn around"
             priority = 5
-        }
-        // Priority 2: Fully blocked at close range
-        else if isBlocked && nearestDistance < 1.5 {
+        } else if isBlocked && nearestDistance < 1.5 {
+            // Completely surrounded at close range
             message = "Stop. Turn around"
             priority = 5
-        }
-        // Priority 3: Very close obstacle
-        else if nearestDistance < 0.5 {
-            message = "Stop"
+        } else if nearestDistance < 0.5 {
+            message = "Stop! Very close obstacle"
             priority = 5
-        }
-        // Priority 4: Close range — clear directional commands
-        else if nearestDistance < 1.0 {
+
+        // ── Very close (< 1.0m) — shout the direction ────────────────────────
+        } else if nearestDistance < 1.0 {
             switch vfhDirection {
-            case .left: message = "Step left now"
-            case .right: message = "Step right now"
-            case .center: message = "Obstacle ahead, slow down"
-            case .none: break
+            case .left:   message = "Go left now"
+            case .right:  message = "Go right now"
+            case .center: message = "Slow down, obstacle directly ahead"
+            case .none:   break
+            }
+            priority = 5   // highest so it cuts through any queued speech
+
+        // ── Close (1.0m–1.8m) — clear spoken direction ───────────────────────
+        } else if nearestDistance < 1.8 {
+            switch vfhDirection {
+            case .left:   message = "Move to the left"
+            case .right:  message = "Move to the right"
+            case .center: message = "Obstacle ahead, move aside"
+            case .none:   break
             }
             priority = 4
-        }
-        // Priority 5: Medium range — directional guidance
-        else if nearestDistance < 1.8 {
+
+        // ── Medium (1.8m–2.5m) — early directional warning ───────────────────
+        } else if nearestDistance < 2.5 {
             switch vfhDirection {
-            case .left: message = "Move left"
-            case .right: message = "Move right"
-            case .center: message = "Obstacle ahead"
-            case .none: break
+            case .left:   message = "Lean left"
+            case .right:  message = "Lean right"
+            case .center: message = "Something ahead"
+            case .none:   break
             }
             priority = 3
-        }
-        // Priority 6: Extended range — early warning
-        else if nearestDistance < 2.5 && vfhDirection != .center && vfhDirection != .none {
-            switch vfhDirection {
-            case .left: message = "Bear left"
-            case .right: message = "Bear right"
-            default: break
-            }
+
+        // ── Path just became clear ────────────────────────────────────────────
+        } else if directionChanged && vfhDirection == .center {
+            message = "Path clear, continue ahead"
             priority = 2
-        }
-        // Priority 7: Clear path confirmation (only when direction changed to center)
-        else if nearestDistance >= 2.5 && directionChanged && vfhDirection == .center {
-            message = "Path clear"
-            priority = 1
         }
 
         if let msg = message {

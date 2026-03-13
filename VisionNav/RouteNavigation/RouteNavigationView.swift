@@ -1208,28 +1208,42 @@ struct RouteNavigationView: View {
                 }
             }
 
-            // ── [MERGE] Debug (throttled to 1 print per second) ──────────────
+            // ── 🧭 Navigation Decision Summary (plain English, once per second) ──
             let mergeNow = Date()
             if mergeNow.timeIntervalSince(lastMergeDebugTime) >= 1.0 {
                 lastMergeDebugTime = mergeNow
-                let fovD   = String(format: "%.2f", cameraManager.nearestObstacleDistance)
-                let fovDir = cameraManager.obstacleDirection
-                let gL     = String(format: "%.2f", gridLeftDist)
-                let gA     = String(format: "%.2f", gridAheadDist)
-                let gR     = String(format: "%.2f", gridRightDist)
-                let gDir   = gridDirection.rawValue
-                let gCells = cameraManager.occupancyGrid.occupiedCellCount
-                let vfhD   = String(format: "%.2f", vfhResult?.nearestObstacle ?? 999)
-                let vfhDir = cameraManager.vfhSuggestedDirection.rawValue
-                let blocked = cameraManager.isPathBlocked
-                let narrow  = vfhResult?.isTooNarrow ?? false
-                let finalD  = String(format: "%.2f", hapticDistance)
-                let finalDir = direction.rawValue
-                print("[MERGE] ─────────────────────────────────────────────────────")
-                print("[MERGE] FOV    → dir:\(fovDir)  nearest:\(fovD)m")
-                print("[MERGE] GRID   → dir:\(gDir)  L:\(gL)m  A:\(gA)m  R:\(gR)m  occupied cells:\(gCells)")
-                print("[MERGE] VFH    → dir:\(vfhDir)  nearest:\(vfhD)m  blocked:\(blocked)  tooNarrow:\(narrow)")
-                print("[MERGE] FINAL  → direction:\(finalDir)  hapticDistance:\(finalD)m  ← this triggers haptic")
+                func ds(_ v: Float) -> String { v > 9 ? "clear" : "\(String(format: "%.1f", v))m" }
+                let camDir   = cameraManager.obstacleDirection
+                let mapCells = cameraManager.occupancyGrid.occupiedCellCount
+                let vfhNear  = vfhResult?.nearestObstacle ?? 999
+                let blocked  = cameraManager.isPathBlocked
+                let narrow   = vfhResult?.isTooNarrow ?? false
+
+                print("🧭 ─── Navigation Decision ─────────────────────────────────────")
+                // Source 1: live camera depth scan
+                let camSummary = camDir == "none"
+                    ? "nothing blocking in camera view"
+                    : "\(camDir.uppercased()) side has something at \(ds(cameraManager.nearestObstacleDistance))"
+                print("   📷 Live camera says: \(camSummary)")
+                // Source 2: remembered obstacle map
+                if mapCells == 0 {
+                    print("   🗺️  Memory map says: no obstacles remembered yet")
+                } else {
+                    print("   🗺️  Memory map says: \(mapCells) obstacle spot(s) on record — left \(ds(gridLeftDist)) | ahead \(ds(gridAheadDist)) | right \(ds(gridRightDist))")
+                }
+                // Source 3: path planner outcome
+                if blocked {
+                    print("   🤖 Path planner: all ways blocked! Nearest obstacle: \(ds(vfhNear))")
+                } else if narrow {
+                    print("   🤖 Path planner: openings exist but too tight to walk through")
+                } else {
+                    let planDir = cameraManager.vfhSuggestedDirection.rawValue
+                    let planLabel = planDir == "none" ? "straight ahead" : planDir.uppercased()
+                    print("   🤖 Path planner: safest route is \(planLabel)  (nearest obstacle \(ds(vfhNear)))")
+                }
+                // Final combined decision
+                let finalLabel = direction == .none ? "no action needed" : "go \(direction.rawValue.uppercased())"
+                print("   ✅ FINAL DECISION: \(finalLabel)  |  obstacle \(ds(hapticDistance)) away")
             }
             // ─────────────────────────────────────────────────────────────────
 
