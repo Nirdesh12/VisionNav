@@ -17,6 +17,13 @@ import CoreHaptics
 /// Set to false for production to avoid console spam.
 let kDebugPipeline = true
 
+// MARK: - Obstacle Detection Debug Flag
+/// Set to true to see detailed per-frame obstacle detection logs:
+///   [FOV-ZONE]  — per-zone raw depth readings and threshold decisions
+///   [HAPTIC]    — when directional haptics fire and why
+/// Prints ~1 line per second via frame throttle; safe to leave on while testing.
+let kDebugObstacle = true
+
 // MARK: - Depth Processing Pipeline (Robotics-Standard)
 /// Processes raw LiDAR depth frames through statistical outlier removal,
 /// bilateral filtering, and temporal fusion for clean, stable depth data.
@@ -971,6 +978,12 @@ class NavigationCameraManager: NSObject, ObservableObject {
         // Only update if proximity or direction changed
         guard newProximity != currentProximity || direction != currentHapticDirection else { return }
 
+        // ── [HAPTIC] Debug ────────────────────────────────────────────────────
+        if kDebugObstacle {
+            print("[HAPTIC] Fired → direction:\(direction.rawValue)  proximity:\(newProximity)  dist:\(String(format: "%.2f", distance))m  (was dir:\(currentHapticDirection.rawValue) prox:\(currentProximity))")
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         currentProximity = newProximity
         currentHapticDirection = direction
         nearestObstacleDistance = distance
@@ -1279,6 +1292,21 @@ class NavigationCameraManager: NSObject, ObservableObject {
         } else {
             direction = "none"
         }
+
+        // ── [FOV-ZONE] Debug ─────────────────────────────────────────────────
+        if kDebugObstacle {
+            let fl = String(format: "%.2f", minDistFarLeft)
+            let l  = String(format: "%.2f", minDistLeft)
+            let c  = String(format: "%.2f", minDistCenter)
+            let r  = String(format: "%.2f", minDistRight)
+            let fr = String(format: "%.2f", minDistFarRight)
+            let om = String(format: "%.2f", overallMin)
+            let sm = String(format: "%.2f", sideMin)
+            print("[FOV-ZONE] farL:\(fl)m  L:\(l)m  CENTER:\(c)m  R:\(r)m  farR:\(fr)m")
+            print("[FOV-ZONE] overallMin:\(om)m  sideMin:\(sm)m  → direction:\(direction)  obstacle:\(hasObstacle)  pathClear:\(isPathClear)")
+            print("[FOV-ZONE] Thresholds — warning:\(warningThreshold)m  side_trigger:2.0m  clear:2.5m")
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         DispatchQueue.main.async {
             self.nearestObstacleDistance = overallMin

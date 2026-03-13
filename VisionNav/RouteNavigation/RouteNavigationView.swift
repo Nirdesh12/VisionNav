@@ -47,6 +47,9 @@ struct RouteNavigationView: View {
     @State private var detectionTimerCancellable: Cancellable?
     @State private var voiceTimerCancellable: Cancellable?
 
+    /// Throttle the [MERGE] debug print to once per second (processFrame() runs at ~4Hz)
+    @State private var lastMergeDebugTime: Date = .distantPast
+
     var body: some View {
         GeometryReader { geometry in
             ZStack {
@@ -1189,20 +1192,46 @@ struct RouteNavigationView: View {
             // Override with VFH steering when path is blocked or VFH suggests a turn
             // VFH provides the safest navigable gap direction (humanoid-robot style)
             let vfhDirection = cameraManager.vfhSuggestedDirection
+            let vfhResult = cameraManager.vfhPlanner.lastResult  // hoisted here so [MERGE] debug can read it
             if cameraManager.isPathBlocked {
                 // All directions blocked — signal center urgency
                 direction = .center
-                let vfhNearest = cameraManager.vfhPlanner.lastResult?.nearestObstacle ?? 999
+                let vfhNearest = vfhResult?.nearestObstacle ?? 999
                 hapticDistance = min(hapticDistance, vfhNearest)
             } else if vfhDirection != .none && vfhDirection != direction {
                 // VFH has computed a preferred safe direction — trust it (no distance gate)
                 direction = vfhDirection
                 // Use VFH's nearest obstacle distance if closer
-                let vfhNearest = cameraManager.vfhPlanner.lastResult?.nearestObstacle ?? 999
+                let vfhNearest = vfhResult?.nearestObstacle ?? 999
                 if vfhNearest < hapticDistance {
                     hapticDistance = vfhNearest
                 }
             }
+
+            // ── [MERGE] Debug (throttled to 1 print per second) ──────────────
+            let mergeNow = Date()
+            if mergeNow.timeIntervalSince(lastMergeDebugTime) >= 1.0 {
+                lastMergeDebugTime = mergeNow
+                let fovD   = String(format: "%.2f", cameraManager.nearestObstacleDistance)
+                let fovDir = cameraManager.obstacleDirection
+                let gL     = String(format: "%.2f", gridLeftDist)
+                let gA     = String(format: "%.2f", gridAheadDist)
+                let gR     = String(format: "%.2f", gridRightDist)
+                let gDir   = gridDirection.rawValue
+                let gCells = cameraManager.occupancyGrid.occupiedCellCount
+                let vfhD   = String(format: "%.2f", vfhResult?.nearestObstacle ?? 999)
+                let vfhDir = cameraManager.vfhSuggestedDirection.rawValue
+                let blocked = cameraManager.isPathBlocked
+                let narrow  = vfhResult?.isTooNarrow ?? false
+                let finalD  = String(format: "%.2f", hapticDistance)
+                let finalDir = direction.rawValue
+                print("[MERGE] ─────────────────────────────────────────────────────")
+                print("[MERGE] FOV    → dir:\(fovDir)  nearest:\(fovD)m")
+                print("[MERGE] GRID   → dir:\(gDir)  L:\(gL)m  A:\(gA)m  R:\(gR)m  occupied cells:\(gCells)")
+                print("[MERGE] VFH    → dir:\(vfhDir)  nearest:\(vfhD)m  blocked:\(blocked)  tooNarrow:\(narrow)")
+                print("[MERGE] FINAL  → direction:\(finalDir)  hapticDistance:\(finalD)m  ← this triggers haptic")
+            }
+            // ─────────────────────────────────────────────────────────────────
 
             cameraManager.updateDirectionalHaptics(
                 forDistance: hapticDistance,
@@ -1210,7 +1239,6 @@ struct RouteNavigationView: View {
             )
 
             // VFH action-oriented voice guidance ("Step right", "Stop", etc.)
-            let vfhResult = cameraManager.vfhPlanner.lastResult
             let vfhNearest = vfhResult?.nearestObstacle ?? hapticDistance
             navigationModel.handleVFHVoiceGuidance(
                 vfhDirection: direction,

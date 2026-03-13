@@ -112,6 +112,13 @@ class NavigationModel: NSObject, ObservableObject {
     // Cross-validation: tracks whether YOLO currently sees stairs (set in processFrame)
     var yoloStairsActive: Bool = false
 
+    // MARK: - YOLO Detection Debug Flag
+    /// Set to true to print every YOLO detection: label, confidence, bbox origin/size, depth.
+    /// Set to false for production to silence logs.
+    private let kDebugYOLO = true
+    /// Throttle: print at most once per second (avoids console flood at 30fps).
+    private var lastYOLODebugTime: Date = .distantPast
+
     private var visionModel: VNCoreMLModel?
     private let confidenceThreshold: Float = 0.55  // Raised from 0.4 to reduce false positives
     private let minStairBBoxArea: CGFloat = 0.008  // Minimum 0.8% of frame area for stair detections
@@ -442,6 +449,33 @@ class NavigationModel: NSObject, ObservableObject {
 
         allResults.sort { ($0.distance ?? 999) < ($1.distance ?? 999) }
         fovResults.sort { ($0.distance ?? 999) < ($1.distance ?? 999) }
+
+        // ── [YOLO] Debug (throttled to 1 print per second) ───────────────────
+        if kDebugYOLO {
+            let now = Date()
+            if now.timeIntervalSince(lastYOLODebugTime) >= 1.0 {
+                lastYOLODebugTime = now
+                if allResults.isEmpty {
+                    print("[YOLO] No detections this frame (conf threshold: \(confidenceThreshold))")
+                } else {
+                    print("[YOLO] ── \(allResults.count) detection(s) ──────────────────────────")
+                    for d in allResults {
+                        let bb = d.boundingBox
+                        let depthStr = d.distance.map { String(format: "%.2fm", $0) } ?? "no depth"
+                        let inFOV = fovResults.contains { $0.id == d.id } ? "✓ IN-FOV" : "  out-fov"
+                        let role = d.isObstacle ? "OBSTACLE" : (d.isGuidance ? "guidance" : "other   ")
+                        // BBox in Vision coords: origin=bottom-left, y increases upward
+                        print(String(format: "[YOLO]   %@ %@  conf:%.0f%%  bbox(x:%.2f y:%.2f w:%.2f h:%.2f)  depth:%@",
+                                     inFOV, role,
+                                     d.confidence * 100,
+                                     bb.origin.x, bb.origin.y, bb.width, bb.height,
+                                     depthStr))
+                    }
+                    print("[YOLO]   FOV obstacles: \(fovResults.filter{$0.isObstacle}.count)  minDist: \(String(format: "%.2f", minDist))m")
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         checkAlert(fovResults)
 
