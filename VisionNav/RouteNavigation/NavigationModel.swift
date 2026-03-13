@@ -150,6 +150,10 @@ class NavigationModel: NSObject, ObservableObject {
     private let dropOffCooldown: TimeInterval = 3.0
     private var lastEmergencyAlertTime: Date = .distantPast
     private var lastDropOffAlertTime: Date = .distantPast
+    /// Stair detection lingers for this many seconds after YOLO last saw stairs.
+    /// Prevents the "stairs" banner from flashing on and off between frames.
+    private var lastStairFoundTime: Date = .distantPast
+    private let stairPersistDuration: TimeInterval = 3.0
 
     // Device pitch — used to suppress ground-plane false obstacle alerts
     var devicePitch: Float = 0  // radians, set from ARFrame.camera.eulerAngles.x
@@ -438,12 +442,17 @@ class NavigationModel: NSObject, ObservableObject {
 
         // Analyze stairs with LiDAR
         if foundStairs, let box = stairsBBox {
+            lastStairFoundTime = Date()  // stamp every confirmed detection
             analyzeStairsWithLiDAR(boundingBox: box)
         } else {
-            DispatchQueue.main.async {
-                self.stairsDetected = false
-                self.stairCount = 0
-                self.stairDirection = .unknown
+            // Don't clear immediately — keep showing for stairPersistDuration seconds
+            // so the banner doesn't flash on/off between YOLO frames.
+            if Date().timeIntervalSince(lastStairFoundTime) > stairPersistDuration {
+                DispatchQueue.main.async {
+                    self.stairsDetected = false
+                    self.stairCount = 0
+                    self.stairDirection = .unknown
+                }
             }
         }
 
@@ -1140,18 +1149,18 @@ class NavigationModel: NSObject, ObservableObject {
 
                 // Voice gating based on feedback mode
                 switch feedbackMode {
-                case .voiceOnly:
-                    self.speak(message, priority: priority)
-                case .hapticOnly:
-                    break  // Directional haptics handle all feedback
-                case .hapticWithCriticalVoice:
-                    // Speak only for critical/emergency situations or blocked path
-                    if priority >= 4 || allZonesBlocked {
-                        let voiceMessage = allZonesBlocked && priority < 4
-                            ? "Path blocked. Turn around or wait."
+                case .voiceOnly, .hapticWithCriticalVoice:
+                    // Speak for all obstacle bands (2m and closer) so the user always
+                    // hears which direction to go. "hapticOnly" mode keeps silence here
+                    // since handleVFHVoiceGuidance is also gated by hapticOnly.
+                    if priority >= 2 || allZonesBlocked {
+                        let voiceMessage = allZonesBlocked
+                            ? "Path blocked, please turn around"
                             : message
-                        self.speak(voiceMessage, priority: max(priority, 4))
+                        self.speak(voiceMessage, priority: priority)
                     }
+                case .hapticOnly:
+                    break  // Vibration only, no voice
                 }
             }
         } else if pathClear && nearestDistance >= 3.0 {
@@ -1163,10 +1172,10 @@ class NavigationModel: NSObject, ObservableObject {
             lastAnnouncedDistanceBand = 0
             consecutiveBandFrames = 0
 
-            // "Path clear" only speaks in voice modes
-            if feedbackMode == .voiceOnly {
+            // "Path clear" speaks in both voice modes
+            if feedbackMode != .hapticOnly {
                 DispatchQueue.main.async {
-                    self.speak("Path clear", priority: 1)
+                    self.speak("Path clear, continue ahead", priority: 1)
                 }
             }
         }

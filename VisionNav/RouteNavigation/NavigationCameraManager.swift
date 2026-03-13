@@ -1325,7 +1325,8 @@ class NavigationCameraManager: NSObject, ObservableObject {
             self.obstacleInFOV = hasObstacle
             self.obstacleDirection = direction
             self.pathClear = isPathClear
-            self.updateHaptics(forDistance: overallMin)
+            // NOTE: haptic feedback is driven by updateDirectionalHaptics() in processFrame(),
+            // not here — avoids two competing haptic sources firing at different rates.
         }
     }
 
@@ -1877,27 +1878,38 @@ struct FullScreenARView: UIViewRepresentable {
                 positions.append(SCNVector3(v.x, v.y, v.z))
             }
 
-            // Distance-based coloring: red = close danger, yellow = warning, green = safe
+            // Distance-based danger coloring:
+            //   Red   < 1.0m — obstacle in your path right now
+            //   Yellow 1–2.5m — approaching, proceed with caution
+            //   Green  > 2.5m — safe
+            //
+            // Height filter: vertices more than 1.0m above OR 0.3m below the camera
+            // are floor / ceiling — not walking obstacles. Always color them green so
+            // the floor doesn't show as red (it's 1.5m below the camera = 0m horizontal dist).
             let meshTransform = meshAnchor.transform
             var colors = [SCNVector3]()
             colors.reserveCapacity(vertexCount)
             for i in 0..<vertexCount {
                 let v = positions[i]
                 let worldPos = meshTransform * simd_float4(v.x, v.y, v.z, 1.0)
+                let dy = worldPos.y - cameraPos.y           // positive = above camera
                 let dx = worldPos.x - cameraPos.x
                 let dz = worldPos.z - cameraPos.z
-                let dist = sqrt(dx * dx + dz * dz) // Horizontal distance
+                let horizDist = sqrt(dx * dx + dz * dz)    // horizontal distance only
+
+                // Floor is typically ~1.5m below camera; ceiling is ~0.5m+ above.
+                // Only evaluate proximity for things roughly at walking-path height.
+                let isFloorOrCeiling = dy < -0.3 || dy > 1.0  // below knee-height or above head
+
+                let dist: Float = isFloorOrCeiling ? 999.0 : horizDist
 
                 if dist < 1.0 {
-                    // Danger zone (red) — close to user
-                    colors.append(SCNVector3(1.0, 0.2, 0.15))
+                    colors.append(SCNVector3(1.0, 0.2, 0.15))          // Red — danger
                 } else if dist < 2.5 {
-                    // Warning zone (yellow/orange)
-                    let t = (dist - 1.0) / 1.5 // 0 at 1m, 1 at 2.5m
-                    colors.append(SCNVector3(1.0, Float(0.3 + t * 0.55), Float(0.1 + t * 0.1)))
+                    let t = (dist - 1.0) / 1.5
+                    colors.append(SCNVector3(1.0, Float(0.3 + t * 0.55), Float(0.1 + t * 0.1)))  // Yellow
                 } else {
-                    // Safe zone (green)
-                    colors.append(SCNVector3(0.2, 0.85, 0.3))
+                    colors.append(SCNVector3(0.2, 0.85, 0.3))          // Green — safe
                 }
             }
 
