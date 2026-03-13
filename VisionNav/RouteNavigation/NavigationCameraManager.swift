@@ -708,11 +708,14 @@ public enum HapticDirection: String {
 
 // MARK: - FOV Box Configuration
 public struct FOVBoxConfig {
-    var widthRatio: CGFloat = 0.35  // Narrower: sized for human passage (~shoulder width)
-    var heightRatio: CGFloat = 0.7  // Taller: captures full walking path
-    var centerXOffset: CGFloat = 0  // -0.3 to 0.3
-    var centerYOffset: CGFloat = 0  // -0.3 to 0.3
-    var sideMarginRatio: CGFloat = 0.12 // Extra margin on each side for incoming obstacle alerts
+    // Shoulder-width corridor: ~22% of frame width fits one person comfortably.
+    // Height 50% and shifted up 8% so the bottom edge sits mid-frame,
+    // well above the floor which appears in the lower 30-40% of the image.
+    var widthRatio: CGFloat = 0.22
+    var heightRatio: CGFloat = 0.50
+    var centerXOffset: CGFloat = 0
+    var centerYOffset: CGFloat = -0.08  // shift box up to exclude floor pixels
+    var sideMarginRatio: CGFloat = 0.06  // small extra margin for side-obstacle awareness
 
     var minWidth: CGFloat { 0.2 }
     var maxWidth: CGFloat { 0.8 }
@@ -1223,9 +1226,15 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
         // Center zone = FOV box (human passage area)
         let centerStartX = Int(fovBox.minX * CGFloat(width))
-        let centerEndX = Int(fovBox.maxX * CGFloat(width))
-        let startY = Int(fovBox.minY * CGFloat(height))
-        let endY = Int(fovBox.maxY * CGFloat(height))
+        let centerEndX   = Int(fovBox.maxX * CGFloat(width))
+        let startY       = Int(fovBox.minY * CGFloat(height))
+        let endY         = Int(fovBox.maxY * CGFloat(height))
+
+        // Trim bottom 25% of the box rows from the CENTER measurement.
+        // Even with the box raised, a slight downward tilt can put the floor in the
+        // lower rows. Using only the upper 75% of rows for the forward-path reading
+        // prevents the floor from appearing as a close obstacle directly ahead.
+        let centerEndY = Int(fovBox.minY * CGFloat(height) + fovBox.height * 0.75 * CGFloat(height))
 
         // Extended bounds: left/right margins for incoming obstacle detection
         let extStartX = max(0, Int((fovBox.minX - margin) * CGFloat(width)))
@@ -1258,8 +1267,11 @@ class NavigationCameraManager: NSObject, ObservableObject {
                     } else if x < centerStartX {
                         minDistLeft = min(minDistLeft, depth)
                     } else if x < centerEndX {
-                        minDistCenter = min(minDistCenter, depth)
-                        overallMin = min(overallMin, depth)
+                        // Only count as forward-path obstacle if above the floor-trim row
+                        if y < centerEndY {
+                            minDistCenter = min(minDistCenter, depth)
+                            overallMin    = min(overallMin, depth)
+                        }
                     } else if x < rightMarginMid {
                         minDistRight = min(minDistRight, depth)
                     } else {
@@ -1269,32 +1281,30 @@ class NavigationCameraManager: NSObject, ObservableObject {
             }
         }
 
-        // Combined left/right distances (backward-compatible with 3-zone consumers)
-        let combinedLeft = min(minDistFarLeft, minDistLeft)
+        // Combined left/right distances
+        let combinedLeft  = min(minDistFarLeft, minDistLeft)
         let combinedRight = min(minDistRight, minDistFarRight)
 
-        // Overall minimum considers center zone primarily,
-        // but also triggers if side obstacles are very close
+        // Side obstacles only bleed into overallMin if they are very close (< 1.0m).
+        // This prevents walls at 1.5-2m on the sides from triggering "obstacle ahead".
         let sideMin = min(combinedLeft, combinedRight)
-        if sideMin < 1.5 { overallMin = min(overallMin, sideMin) }
+        if sideMin < 1.0 { overallMin = min(overallMin, sideMin) }
 
         let avgDepth = validCount > 0 ? totalDepth / validCount : 999
 
-        // Determine obstacle state based on center passage zone
-        let warningThreshold: Float = 3.0
-        let hasObstacle = overallMin < warningThreshold || sideMin < 2.0
-        let isPathClear = minDistCenter >= warningThreshold && sideMin >= 2.5
+        // 1.0m threshold: only alert when something is within arms-reach ahead
+        let warningThreshold: Float = 1.0
+        let hasObstacle = overallMin < warningThreshold
+        let isPathClear = minDistCenter >= warningThreshold && sideMin >= 1.0
 
-        // Determine primary obstacle direction
+        // Direction: only trigger for obstacles closer than 1.0m on sides
         let direction: String
-        if minDistCenter < warningThreshold && minDistCenter <= sideMin {
+        if minDistCenter < warningThreshold {
             direction = "center"
-        } else if combinedLeft < 2.0 && combinedLeft < combinedRight {
+        } else if combinedLeft < 1.0 && combinedLeft <= combinedRight {
             direction = "left"
-        } else if combinedRight < 2.0 && combinedRight < combinedLeft {
+        } else if combinedRight < 1.0 && combinedRight < combinedLeft {
             direction = "right"
-        } else if minDistCenter < warningThreshold {
-            direction = "center"
         } else {
             direction = "none"
         }
@@ -1302,14 +1312,13 @@ class NavigationCameraManager: NSObject, ObservableObject {
         // ── 📷 Camera Depth Reading (plain English) ─────────────────────────
         if kDebugObstacle {
             func dist(_ v: Float) -> String { v > 9 ? "clear" : "\(String(format: "%.1f", v))m" }
-            print("📷 What the camera sees:")
+            print("📷 What the camera sees (shoulder-width corridor, 1m threshold):")
             print("   Far left: \(dist(minDistFarLeft))  |  Left: \(dist(minDistLeft))  |  STRAIGHT AHEAD: \(dist(minDistCenter))  |  Right: \(dist(minDistRight))  |  Far right: \(dist(minDistFarRight))")
             print("   Closest thing in path: \(dist(overallMin))   Closest to sides: \(dist(sideMin))")
             if isPathClear {
-                print("   ✅ Path looks clear — no obstacles detected")
+                print("   ✅ Nothing within 1m — path is clear")
             } else {
-                print("   🚧 Something detected → blocking direction: \(direction == "none" ? "nothing yet" : direction.uppercased())")
-                print("   (Triggers alert if straight-ahead < \(warningThreshold)m or sides < 2.0m)")
+                print("   🚧 Obstacle within 1m → direction: \(direction == "none" ? "unknown" : direction.uppercased())")
             }
         }
         // ─────────────────────────────────────────────────────────────────────

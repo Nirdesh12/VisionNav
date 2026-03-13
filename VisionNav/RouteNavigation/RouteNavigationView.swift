@@ -1176,17 +1176,16 @@ struct RouteNavigationView: View {
             let gridRightDist = grid.nearestFrontRight
             let gridAheadDist = grid.nearestAhead
 
-            if direction == .none && gridDirection != .none {
-                // Occupancy grid detected an obstacle that FOV depth missed
+            // Only use the occupancy grid when it shows something DIRECTLY AHEAD within 1.5m.
+            // Stale side-wall cells in the grid must not override a clear forward FOV reading —
+            // that is what was causing "obstacle ahead" with green mesh in front.
+            let gridNearest = min(gridLeftDist, min(gridRightDist, gridAheadDist))
+            if direction == .none && gridDirection != .none && gridAheadDist < 1.5 {
                 direction = gridDirection
-                hapticDistance = min(gridLeftDist, min(gridRightDist, gridAheadDist))
-            } else if direction != .none {
-                // Both sources active — use the closest obstacle from either
-                let gridNearest = min(gridLeftDist, min(gridRightDist, gridAheadDist))
-                if gridNearest < hapticDistance && gridDirection != .none {
-                    direction = gridDirection
-                    hapticDistance = gridNearest
-                }
+                hapticDistance = gridAheadDist
+            } else if direction != .none && gridAheadDist < hapticDistance && gridAheadDist < 1.5 {
+                direction = gridDirection
+                hapticDistance = gridAheadDist
             }
 
             // Override with VFH steering when path is blocked or VFH suggests a turn

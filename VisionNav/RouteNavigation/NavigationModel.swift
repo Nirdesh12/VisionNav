@@ -145,7 +145,7 @@ class NavigationModel: NSObject, ObservableObject {
     private let dangerCooldown: TimeInterval = 2.5
     private let warningCooldown: TimeInterval = 4.0
     private let fovAlertCooldown: TimeInterval = 4.0
-    private let pathClearCooldown: TimeInterval = 15.0
+    private let pathClearCooldown: TimeInterval = 5.0   // Say "safe to proceed" at most every 5s
     private let stairCooldown: TimeInterval = 4.0
     private let dropOffCooldown: TimeInterval = 3.0
     private var lastEmergencyAlertTime: Date = .distantPast
@@ -1075,7 +1075,9 @@ class NavigationModel: NSObject, ObservableObject {
         }
 
         // === Progressive distance callouts with directional guidance ===
-        if obstacleInFOV && nearestDistance < 3.0 {
+        // Only speak when something is within 1.5m — matches the new 1.0m FOV threshold
+        // with a small buffer so guidance starts slightly before the hard limit.
+        if obstacleInFOV && nearestDistance < 1.5 {
             let suggestedDir = suggestAvoidanceDirection(
                 obstacleDir: obstacleDirection,
                 leftDist: leftZoneDistance,
@@ -1163,19 +1165,19 @@ class NavigationModel: NSObject, ObservableObject {
                     break  // Vibration only, no voice
                 }
             }
-        } else if pathClear && nearestDistance >= 3.0 {
+        } else if pathClear && nearestDistance >= 1.0 {
             guard now.timeIntervalSince(lastPathClearTime) > pathClearCooldown else { return }
-            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 5.0 else { return }
+            guard now.timeIntervalSince(lastFOVObstacleAlertTime) > 2.0 else { return }
 
             lastPathClearTime = now
             lastFOVAlertMessage = ""
             lastAnnouncedDistanceBand = 0
             consecutiveBandFrames = 0
 
-            // "Path clear" speaks in both voice modes
+            // "Safe to proceed" in all non-haptic modes
             if feedbackMode != .hapticOnly {
                 DispatchQueue.main.async {
-                    self.speak("Path clear, continue ahead", priority: 1)
+                    self.speak("Safe to proceed", priority: 1)
                 }
             }
         }
