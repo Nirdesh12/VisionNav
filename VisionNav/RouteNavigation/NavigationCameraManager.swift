@@ -708,11 +708,11 @@ public enum HapticDirection: String {
 
 // MARK: - FOV Box Configuration
 public struct FOVBoxConfig {
-    // Shoulder-width corridor: ~22% of frame width fits one person comfortably.
-    // Height 50% and shifted up 8% so the bottom edge sits mid-frame,
+    // Shoulder-width corridor: ~30% of frame width fits one person comfortably.
+    // Height 60% and shifted up 8% so the bottom edge sits mid-frame,
     // well above the floor which appears in the lower 30-40% of the image.
-    var widthRatio: CGFloat = 0.22
-    var heightRatio: CGFloat = 0.50
+    var widthRatio: CGFloat = 0.30
+    var heightRatio: CGFloat = 0.60
     var centerXOffset: CGFloat = 0
     var centerYOffset: CGFloat = -0.08  // shift box up to exclude floor pixels
     var sideMarginRatio: CGFloat = 0.06  // small extra margin for side-obstacle awareness
