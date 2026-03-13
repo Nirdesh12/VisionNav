@@ -1172,8 +1172,9 @@ class NavigationModel: NSObject, ObservableObject {
             lastAnnouncedDistanceBand = currentBand
             consecutiveBandFrames = 0
 
-            // Completely blocked when all three zones are within 1.5m
-            let allZonesBlocked = leftZoneDistance < 1.5 && centerZoneDistance < 1.5 && rightZoneDistance < 1.5
+            // "Path blocked" only when all three zones are genuinely boxed in (< 0.5m).
+            // At 1–1.5m there is still room to steer — give direction instead of panic message.
+            let allZonesBlocked = leftZoneDistance < 0.5 && centerZoneDistance < 0.5 && rightZoneDistance < 0.5
 
             DispatchQueue.main.async {
                 let alertType: NavigationAlert.AlertType = effectiveDist < 1.0 ? .danger : .warning
@@ -1301,8 +1302,8 @@ class NavigationModel: NSObject, ObservableObject {
             // All openings too tight to walk through
             message = "No room to pass. Please turn around"
             priority = 5
-        } else if isBlocked && nearestDistance < 1.5 {
-            // Completely surrounded at close range
+        } else if isBlocked && nearestDistance < 0.5 {
+            // Completely surrounded — genuinely no escape within 0.5m
             message = "Stop. Turn around"
             priority = 5
         } else if nearestDistance < 0.5 {
