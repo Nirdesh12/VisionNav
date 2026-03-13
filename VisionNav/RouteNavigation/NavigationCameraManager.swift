@@ -1302,18 +1302,20 @@ class NavigationCameraManager: NSObject, ObservableObject {
 
         let avgDepth = validCount > 0 ? totalDepth / validCount : 999
 
-        // 1.0m threshold: only alert when something is within arms-reach ahead
-        let warningThreshold: Float = 1.0
+        // 1.5m forward-detection threshold — gives enough reaction time at walking pace.
+        // pathClear is based on CENTER only: walking next to a wall on the side
+        // should not count as "blocked" and must not trigger emergency haptics.
+        let warningThreshold: Float = 1.5
         let hasObstacle = overallMin < warningThreshold
-        let isPathClear = minDistCenter >= warningThreshold && sideMin >= 1.0
+        let isPathClear = minDistCenter >= warningThreshold   // center-only, ignore sides
 
-        // Direction: only trigger for obstacles closer than 1.0m on sides
+        // Direction: sides at 1.5m (earlier warning), center at threshold
         let direction: String
         if minDistCenter < warningThreshold {
             direction = "center"
-        } else if combinedLeft < 1.0 && combinedLeft <= combinedRight {
+        } else if combinedLeft < 1.5 && combinedLeft <= combinedRight {
             direction = "left"
-        } else if combinedRight < 1.0 && combinedRight < combinedLeft {
+        } else if combinedRight < 1.5 && combinedRight < combinedLeft {
             direction = "right"
         } else {
             direction = "none"
@@ -1322,13 +1324,13 @@ class NavigationCameraManager: NSObject, ObservableObject {
         // ── 📷 Camera Depth Reading (plain English) ─────────────────────────
         if kDebugObstacle {
             func dist(_ v: Float) -> String { v > 9 ? "clear" : "\(String(format: "%.1f", v))m" }
-            print("📷 What the camera sees (shoulder-width corridor, 1m threshold):")
+            print("📷 What the camera sees (shoulder-width corridor, 1.5m threshold):")
             print("   Far left: \(dist(minDistFarLeft))  |  Left: \(dist(minDistLeft))  |  STRAIGHT AHEAD: \(dist(minDistCenter))  |  Right: \(dist(minDistRight))  |  Far right: \(dist(minDistFarRight))")
             print("   Closest thing in path: \(dist(overallMin))   Closest to sides: \(dist(sideMin))")
             if isPathClear {
-                print("   ✅ Nothing within 1m — path is clear")
+                print("   ✅ Center clear beyond 1.5m — path is clear")
             } else {
-                print("   🚧 Obstacle within 1m → direction: \(direction == "none" ? "unknown" : direction.uppercased())")
+                print("   🚧 Something within 1.5m → direction: \(direction == "none" ? "unknown" : direction.uppercased())")
             }
         }
         // ─────────────────────────────────────────────────────────────────────
