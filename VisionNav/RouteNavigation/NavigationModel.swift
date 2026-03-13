@@ -1293,8 +1293,10 @@ class NavigationModel: NSObject, ObservableObject {
             }
             priority = 5   // highest so it cuts through any queued speech
 
-        // ── Close (1.0m–1.8m) — clear spoken direction ───────────────────────
-        } else if nearestDistance < 1.8 {
+        // ── Close (1.0m–1.5m) — clear spoken direction ───────────────────────
+        // Capped at 1.5m: beyond this the occupancy grid may have stale scan data
+        // and we don't want false "move left/right" when the live camera shows clear.
+        } else if nearestDistance < 1.5 {
             switch vfhDirection {
             case .left:   message = "Move to the left"
             case .right:  message = "Move to the right"
@@ -1302,16 +1304,6 @@ class NavigationModel: NSObject, ObservableObject {
             case .none:   break
             }
             priority = 4
-
-        // ── Medium (1.8m–2.5m) — early directional warning ───────────────────
-        } else if nearestDistance < 2.5 {
-            switch vfhDirection {
-            case .left:   message = "Lean left"
-            case .right:  message = "Lean right"
-            case .center: message = "Something ahead"
-            case .none:   break
-            }
-            priority = 3
 
         // ── Path just became clear ────────────────────────────────────────────
         } else if directionChanged && vfhDirection == .center {

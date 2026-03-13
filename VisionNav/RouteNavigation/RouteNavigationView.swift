@@ -1192,16 +1192,17 @@ struct RouteNavigationView: View {
             // VFH provides the safest navigable gap direction (humanoid-robot style)
             let vfhDirection = cameraManager.vfhSuggestedDirection
             let vfhResult = cameraManager.vfhPlanner.lastResult  // hoisted here so [MERGE] debug can read it
+            let vfhNearest = vfhResult?.nearestObstacle ?? 999
             if cameraManager.isPathBlocked {
                 // All directions blocked — signal center urgency
                 direction = .center
-                let vfhNearest = vfhResult?.nearestObstacle ?? 999
                 hapticDistance = min(hapticDistance, vfhNearest)
-            } else if vfhDirection != .none && vfhDirection != direction {
-                // VFH has computed a preferred safe direction — trust it (no distance gate)
+            } else if vfhDirection != .none && vfhNearest < 1.5 && !cameraManager.pathClear {
+                // Only trust VFH steering when:
+                //   1. VFH reports an obstacle within 1.5m (grid data is fresh/close)
+                //   2. Camera FOV also confirms path is NOT clear (not stale scan)
+                // This prevents scanned wall geometry from overriding a clear live camera view.
                 direction = vfhDirection
-                // Use VFH's nearest obstacle distance if closer
-                let vfhNearest = vfhResult?.nearestObstacle ?? 999
                 if vfhNearest < hapticDistance {
                     hapticDistance = vfhNearest
                 }
@@ -1252,7 +1253,6 @@ struct RouteNavigationView: View {
             )
 
             // VFH action-oriented voice guidance ("Step right", "Stop", etc.)
-            let vfhNearest = vfhResult?.nearestObstacle ?? hapticDistance
             navigationModel.handleVFHVoiceGuidance(
                 vfhDirection: direction,
                 isBlocked: cameraManager.isPathBlocked,
