@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxGraphModel
+  dx="1422" dy="762"
+  grid="1" gridSize="10"
+  guides="1" tooltips="1"
+  connect="1" arrows="1"
+  fold="1" page="1"
+  pageScale="1" pageWidth="1169" pageHeight="827"
+  math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- EXTERNAL ENTITY: iOS Device Hardware (top-left) -->
+    <mxCell id="20"
+      value="&lt;b&gt;iOS Device Hardware&lt;/b&gt;&lt;br&gt;(Camera, LiDAR)"
+      style="rounded=0;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="140" width="190" height="65" as="geometry" />
+    </mxCell>
+
+    <!-- EXTERNAL ENTITY: Visually Impaired User (right) -->
+    <mxCell id="21"
+      value="&lt;b&gt;Visually Impaired User&lt;/b&gt;"
+      style="rounded=0;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="950" y="370" width="175" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 1.1: Capture Camera and Depth Data -->
+    <mxCell id="10"
+      value="&lt;b&gt;1.1&lt;/b&gt;&lt;br&gt;Capture Camera&lt;br&gt;&amp; Depth Data"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="300" y="120" width="185" height="100" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 1.2: Depth Processing -->
+    <mxCell id="11"
+      value="&lt;b&gt;1.2&lt;/b&gt;&lt;br&gt;Depth Processing&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(ARKitDepthProcessor)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="560" y="70" width="185" height="100" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 1.3: YOLO Object Detection -->
+    <mxCell id="12"
+      value="&lt;b&gt;1.3&lt;/b&gt;&lt;br&gt;YOLO Object&lt;br&gt;Detection&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(VNCoreML)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="560" y="310" width="185" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 1.4: Generate Speech Alert -->
+    <mxCell id="13"
+      value="&lt;b&gt;1.4&lt;/b&gt;&lt;br&gt;Generate Speech Alert&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(AVSpeechSynthesizer)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="795" y="240" width="185" height="105" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 1.5: Generate Haptic Feedback -->
+    <mxCell id="14"
+      value="&lt;b&gt;1.5&lt;/b&gt;&lt;br&gt;Generate Haptic&lt;br&gt;Feedback&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(HapticFeedbackManager)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="795" y="490" width="185" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- DATA STORE DS1: User Preferences -->
+    <mxCell id="50"
+      value="DS1  |  User Preferences"
+      style="shape=mxgraph.dfd.dataStore;whiteSpace=wrap;html=1;
+             fontSize=11;fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="600" width="230" height="48" as="geometry" />
+    </mxCell>
+
+    <!-- DATA STORE DS2: YOLO ML Model -->
+    <mxCell id="51"
+      value="DS2  |  YOLO ML Model (yolov26s.mlpackage)"
+      style="shape=mxgraph.dfd.dataStore;whiteSpace=wrap;html=1;
+             fontSize=11;fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="300" y="600" width="290" height="48" as="geometry" />
+    </mxCell>
+
+    <!-- DATA STORE DS3: Speech History -->
+    <mxCell id="52"
+      value="DS3  |  Speech History (label + timestamp)"
+      style="shape=mxgraph.dfd.dataStore;whiteSpace=wrap;html=1;
+             fontSize=11;fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="630" y="660" width="290" height="48" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: iOS Hardware to 1.1 - ARKit Frame and LiDAR Depth -->
+    <mxCell id="60"
+      value="ARKit Frame + LiDAR Depth"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.5;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.5;entryDx=0;entryDy=0;"
+      edge="1" source="20" target="10" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 1.1 to 1.2 - Raw Depth Map -->
+    <mxCell id="61"
+      value="Raw Depth Map (ARDepthData)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.3;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.5;entryDx=0;entryDy=0;"
+      edge="1" source="10" target="11" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 1.1 to 1.3 - Camera Frame (CVPixelBuffer) -->
+    <mxCell id="62"
+      value="Camera Frame (CVPixelBuffer)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.7;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.2;entryDx=0;entryDy=0;"
+      edge="1" source="10" target="12" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="540" y="192" />
+          <mxPoint x="540" y="332" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 1.2 to 1.3 - Filtered Depth and Distance -->
+    <mxCell id="63"
+      value="Filtered Depth + Distance (m)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.5;exitY=1;exitDx=0;exitDy=0;
+             entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+      edge="1" source="11" target="12" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: DS2 to 1.3 - YOLO ML Model -->
+    <mxCell id="64"
+      value="YOLO ML Model"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.5;exitY=0;exitDx=0;exitDy=0;
+             entryX=0.2;entryY=1;entryDx=0;entryDy=0;"
+      edge="1" source="51" target="12" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 1.3 to 1.4 - Object Label, Confidence, Distance -->
+    <mxCell id="65"
+      value="Object Label + Confidence + Distance"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.3;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.6;entryDx=0;entryDy=0;"
+      edge="1" source="12" target="13" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 1.3 to 1.5 - Proximity Data -->
+    <mxCell id="66"
+      value="Proximity Data"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.7;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.3;entryDx=0;entryDy=0;"
+      edge="1" source="12" target="14" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="780" y="388" />
+          <mxPoint x="780" y="523" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: DS3 to 1.4 - Previous Speech Data -->
+    <mxCell id="67"
+      value="Previous Speech Data"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0;exitY=0;exitDx=0;exitDy=0;
+             entryX=0.5;entryY=1;entryDx=0;entryDy=0;"
+      edge="1" source="52" target="13" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="630" y="620" />
+          <mxPoint x="630" y="540" />
+          <mxPoint x="887" y="540" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 1.4 to DS3 - Updated Speech History -->
+    <mxCell id="68"
+      value="Updated Speech History"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.6;exitY=1;exitDx=0;exitDy=0;
+             entryX=0.7;entryY=0;entryDx=0;entryDy=0;"
+      edge="1" source="13" target="52" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="906" y="580" />
+          <mxPoint x="906" y="630" />
+          <mxPoint x="833" y="630" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 1.4 to User - Audio Alert (TTS) -->
+    <mxCell id="69"
+      value="Audio Alert (TTS)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.4;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.3;entryDx=0;entryDy=0;"
+      edge="1" source="13" target="21" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 1.5 to User - Haptic Vibration -->
+    <mxCell id="70"
+      value="Haptic Vibration"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.5;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.7;entryDx=0;entryDy=0;"
+      edge="1" source="14" target="21" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: DS1 to 1.4 - Speech Rate and Volume -->
+    <mxCell id="71"
+      value="Speech Rate + Volume"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.3;exitDx=0;exitDy=0;
+             entryX=0.1;entryY=1;entryDx=0;entryDy=0;"
+      edge="1" source="50" target="13" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="380" y="590" />
+          <mxPoint x="380" y="740" />
+          <mxPoint x="810" y="740" />
+          <mxPoint x="810" y="345" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: DS1 to 1.5 - Haptic Enable/Disable -->
+    <mxCell id="72"
+      value="Haptic Enable / Disable"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.5;exitY=0;exitDx=0;exitDy=0;
+             entryX=0.1;entryY=1;entryDx=0;entryDy=0;"
+      edge="1" source="50" target="14" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="155" y="580" />
+          <mxPoint x="155" y="770" />
+          <mxPoint x="800" y="770" />
+          <mxPoint x="800" y="600" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- TITLE -->
+    <mxCell id="90"
+      value="&lt;b&gt;VisionNav - DFD Level 2: Object Detection (Process 1.0)&lt;/b&gt;"
+      style="text;html=1;strokeColor=none;fillColor=none;
+             align=center;verticalAlign=middle;whiteSpace=wrap;
+             fontSize=15;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="230" y="775" width="700" height="40" as="geometry" />
+    </mxCell>
+
+  </root>
+</mxGraphModel>
