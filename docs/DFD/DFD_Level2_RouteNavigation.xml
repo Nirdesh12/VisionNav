@@ -1,0 +1,338 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxGraphModel
+  dx="1422" dy="762"
+  grid="1" gridSize="10"
+  guides="1" tooltips="1"
+  connect="1" arrows="1"
+  fold="1" page="1"
+  pageScale="1" pageWidth="1169" pageHeight="827"
+  math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+
+    <!-- EXTERNAL ENTITY: Visually Impaired User (left) -->
+    <mxCell id="20"
+      value="&lt;b&gt;Visually Impaired User&lt;/b&gt;"
+      style="rounded=0;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="340" width="175" height="60" as="geometry" />
+    </mxCell>
+
+    <!-- EXTERNAL ENTITY: iOS Device Hardware (top-left) -->
+    <mxCell id="21"
+      value="&lt;b&gt;iOS Device Hardware&lt;/b&gt;&lt;br&gt;(GPS, Compass, Microphone)"
+      style="rounded=0;whiteSpace=wrap;html=1;fontSize=11;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="100" width="200" height="65" as="geometry" />
+    </mxCell>
+
+    <!-- EXTERNAL ENTITY: External APIs (top-right) -->
+    <mxCell id="22"
+      value="&lt;b&gt;External APIs&lt;/b&gt;&lt;br&gt;(OSRM, OpenStreetMap,&lt;br&gt;MapKit / CoreLocation)"
+      style="rounded=0;whiteSpace=wrap;html=1;fontSize=11;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="910" y="80" width="210" height="70" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 2.1: Voice Input and Route Search -->
+    <mxCell id="10"
+      value="&lt;b&gt;2.1&lt;/b&gt;&lt;br&gt;Voice Input &amp;&lt;br&gt;Route Search&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(NavigationLocationManager)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="290" y="65" width="185" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 2.2: GPS Tracking -->
+    <mxCell id="11"
+      value="&lt;b&gt;2.2&lt;/b&gt;&lt;br&gt;GPS Tracking&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(CLLocationManager)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="290" y="295" width="185" height="100" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 2.3: Route Calculation -->
+    <mxCell id="12"
+      value="&lt;b&gt;2.3&lt;/b&gt;&lt;br&gt;Route Calculation&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(CustomRouteEngine / A*)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="555" y="175" width="185" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 2.4: Route Step Processing -->
+    <mxCell id="13"
+      value="&lt;b&gt;2.4&lt;/b&gt;&lt;br&gt;Route Step&lt;br&gt;Processing&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(NavigationModel)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="795" y="175" width="185" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- PROCESS 2.5: Voice Navigation Output -->
+    <mxCell id="14"
+      value="&lt;b&gt;2.5&lt;/b&gt;&lt;br&gt;Voice Navigation&lt;br&gt;Output&lt;br&gt;&lt;font size=&quot;9&quot;&gt;(AVSpeechSynthesizer)&lt;/font&gt;"
+      style="ellipse;whiteSpace=wrap;html=1;fontSize=12;
+             fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="795" y="390" width="185" height="110" as="geometry" />
+    </mxCell>
+
+    <!-- DATA STORE DS1: User Preferences -->
+    <mxCell id="50"
+      value="DS1  |  User Preferences"
+      style="shape=mxgraph.dfd.dataStore;whiteSpace=wrap;html=1;
+             fontSize=11;fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="600" width="230" height="48" as="geometry" />
+    </mxCell>
+
+    <!-- DATA STORE DS4: Route Cache -->
+    <mxCell id="51"
+      value="DS4  |  Route Cache (Waypoints + Steps)"
+      style="shape=mxgraph.dfd.dataStore;whiteSpace=wrap;html=1;
+             fontSize=11;fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="310" y="600" width="270" height="48" as="geometry" />
+    </mxCell>
+
+    <!-- DATA STORE DS5: Location History -->
+    <mxCell id="52"
+      value="DS5  |  Location History (GPS Track)"
+      style="shape=mxgraph.dfd.dataStore;whiteSpace=wrap;html=1;
+             fontSize=11;fillColor=#ffffff;strokeColor=#000000;strokeWidth=2;"
+      vertex="1" parent="1">
+      <mxGeometry x="630" y="660" width="260" height="48" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: User to 2.1 - Spoken Destination (Voice Command) -->
+    <mxCell id="60"
+      value="Spoken Destination (Voice Command)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.3;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.8;entryDx=0;entryDy=0;"
+      edge="1" source="20" target="10" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="260" y="358" />
+          <mxPoint x="260" y="143" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: iOS Hardware to 2.2 - GPS Location and Compass Heading -->
+    <mxCell id="61"
+      value="GPS Location + Compass Heading"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.5;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.5;entryDx=0;entryDy=0;"
+      edge="1" source="21" target="11" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="270" y="133" />
+          <mxPoint x="270" y="345" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 2.1 to External APIs - Route Request -->
+    <mxCell id="62"
+      value="Route Request (Origin, Destination)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.3;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.35;entryDx=0;entryDy=0;"
+      edge="1" source="10" target="22" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="700" y="98" />
+          <mxPoint x="700" y="104" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: External APIs to 2.1 - OSRM Route Response -->
+    <mxCell id="63"
+      value="OSRM Route Response (Waypoints, Steps)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0;exitY=0.65;exitDx=0;exitDy=0;
+             entryX=1;entryY=0.3;entryDx=0;entryDy=0;"
+      edge="1" source="22" target="10" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="700" y="126" />
+          <mxPoint x="700" y="112" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 2.1 to 2.3 - Destination Coordinates -->
+    <mxCell id="64"
+      value="Destination Coordinates"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.6;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.2;entryDx=0;entryDy=0;"
+      edge="1" source="10" target="12" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="530" y="131" />
+          <mxPoint x="530" y="197" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 2.2 to 2.3 - Current Position and Heading -->
+    <mxCell id="65"
+      value="Current Position + Heading"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.4;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.8;entryDx=0;entryDy=0;"
+      edge="1" source="11" target="12" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 2.2 to 2.4 - Current Position and Heading (for step matching) -->
+    <mxCell id="66"
+      value="Current Position + Heading"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.6;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.8;entryDx=0;entryDy=0;"
+      edge="1" source="11" target="13" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="770" y="357" />
+          <mxPoint x="770" y="263" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 2.3 to DS4 - Calculated Route -->
+    <mxCell id="67"
+      value="Calculated Route (Waypoints, Steps)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.5;exitY=1;exitDx=0;exitDy=0;
+             entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+      edge="1" source="12" target="51" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="647" y="540" />
+          <mxPoint x="445" y="540" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: DS4 to 2.4 - Route Data -->
+    <mxCell id="68"
+      value="Route Data (Steps, Instructions)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.8;exitY=0;exitDx=0;exitDy=0;
+             entryX=0.5;entryY=1;entryDx=0;entryDy=0;"
+      edge="1" source="51" target="13" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="526" y="560" />
+          <mxPoint x="887" y="560" />
+          <mxPoint x="887" y="285" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 2.4 to 2.3 - Off-Route Signal (Re-route Trigger) -->
+    <mxCell id="69"
+      value="Off-Route Signal (Re-route)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0;exitY=0.5;exitDx=0;exitDy=0;
+             entryX=1;entryY=0.5;entryDx=0;entryDy=0;"
+      edge="1" source="13" target="12" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 2.4 to 2.5 - Next Instruction and Distance Remaining -->
+    <mxCell id="70"
+      value="Next Instruction + Distance Remaining"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0.5;exitY=1;exitDx=0;exitDy=0;
+             entryX=0.5;entryY=0;entryDx=0;entryDy=0;"
+      edge="1" source="13" target="14" parent="1">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+
+    <!-- DATA FLOW: 2.2 to DS5 - Updated GPS Track -->
+    <mxCell id="71"
+      value="Updated GPS Track"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.8;exitDx=0;exitDy=0;
+             entryX=0;entryY=0.3;entryDx=0;entryDy=0;"
+      edge="1" source="11" target="52" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="540" y="376" />
+          <mxPoint x="540" y="676" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: DS5 to 2.2 - Location History (deviation detection) -->
+    <mxCell id="72"
+      value="Location History (deviation detection)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0;exitY=0.7;exitDx=0;exitDy=0;
+             entryX=1;entryY=0.8;entryDx=0;entryDy=0;"
+      edge="1" source="52" target="11" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="560" y="692" />
+          <mxPoint x="560" y="392" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: DS1 to 2.5 - Speech Rate and Volume -->
+    <mxCell id="73"
+      value="Speech Rate + Volume"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=1;exitY=0.5;exitDx=0;exitDy=0;
+             entryX=0.1;entryY=1;entryDx=0;entryDy=0;"
+      edge="1" source="50" target="14" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="380" y="624" />
+          <mxPoint x="380" y="760" />
+          <mxPoint x="814" y="760" />
+          <mxPoint x="814" y="500" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- DATA FLOW: 2.5 to User - Voice Navigation Instruction (Audio) -->
+    <mxCell id="74"
+      value="Voice Navigation Instruction (Audio)"
+      style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;
+             exitX=0;exitY=0.5;exitDx=0;exitDy=0;
+             entryX=1;entryY=0.5;entryDx=0;entryDy=0;"
+      edge="1" source="14" target="20" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points">
+          <mxPoint x="680" y="445" />
+          <mxPoint x="680" y="370" />
+          <mxPoint x="215" y="370" />
+        </Array>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- TITLE -->
+    <mxCell id="90"
+      value="&lt;b&gt;VisionNav - DFD Level 2: Route Navigation (Process 2.0)&lt;/b&gt;"
+      style="text;html=1;strokeColor=none;fillColor=none;
+             align=center;verticalAlign=middle;whiteSpace=wrap;
+             fontSize=15;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="230" y="775" width="700" height="40" as="geometry" />
+    </mxCell>
+
+  </root>
+</mxGraphModel>
