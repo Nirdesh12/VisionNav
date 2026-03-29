@@ -1,138 +1,137 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mxfile version="21.0.0">
   <diagram name="VisionNav Flowchart" id="visionnav-flowchart">
-    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1"
-                  tooltips="1" connect="1" arrows="1" fold="1" page="1"
-                  pageScale="1" pageWidth="1200" pageHeight="1800"
-                  math="0" shadow="0">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1"
+                  connect="1" arrows="1" fold="1" page="1" pageScale="1"
+                  pageWidth="1400" pageHeight="1900" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
 
-        <!-- ── APP ENTRY ── -->
+        <!-- ═══════════════════════ APP ENTRY ═══════════════════════ -->
 
-        <mxCell id="2" value="App Launch" parent="1" vertex="1"
+        <mxCell id="2" value="&#x1F4F1; App Launch" parent="1" vertex="1"
           style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;">
-          <mxGeometry x="450" y="40" width="180" height="55" as="geometry" />
+          <mxGeometry x="550" y="40" width="200" height="60" as="geometry" />
         </mxCell>
 
-        <mxCell id="3" value="Home Screen" parent="1" vertex="1"
+        <mxCell id="3" value="&#x1F3E0; Home Screen" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;">
-          <mxGeometry x="450" y="140" width="180" height="50" as="geometry" />
+          <mxGeometry x="550" y="150" width="200" height="60" as="geometry" />
         </mxCell>
 
-        <!-- ── OBJECT DETECTION (left column, centre x=220) ── -->
+        <!-- ═══════════════ OBJECT DETECTION (left column, centre x=200) ═══════════════ -->
 
-        <mxCell id="10" value="Object Detection" parent="1" vertex="1"
+        <mxCell id="10" value="&#x1F50D; Object Detection" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;">
-          <mxGeometry x="100" y="260" width="200" height="50" as="geometry" />
+          <mxGeometry x="100" y="290" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="11" value="Start Camera + LiDAR" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
-          <mxGeometry x="100" y="350" width="200" height="50" as="geometry" />
+          <mxGeometry x="100" y="380" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="12" value="Capture Frame" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
-          <mxGeometry x="100" y="440" width="200" height="50" as="geometry" />
+          <mxGeometry x="100" y="470" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="13" value="Run YOLOv8 Model" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
-          <mxGeometry x="100" y="530" width="200" height="50" as="geometry" />
+          <mxGeometry x="100" y="560" width="200" height="50" as="geometry" />
         </mxCell>
 
-        <mxCell id="14" value="Object Detected?" parent="1" vertex="1"
+        <mxCell id="14" value="Object&#xa;Detected?" parent="1" vertex="1"
           style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
-          <mxGeometry x="95" y="615" width="210" height="75" as="geometry" />
+          <mxGeometry x="95" y="645" width="210" height="80" as="geometry" />
         </mxCell>
 
         <mxCell id="15" value="Get Depth (LiDAR)" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
-          <mxGeometry x="100" y="730" width="200" height="50" as="geometry" />
+          <mxGeometry x="100" y="765" width="200" height="50" as="geometry" />
         </mxCell>
 
-        <mxCell id="16" value="Voice + Haptic Alert" parent="1" vertex="1"
+        <mxCell id="16" value="&#x1F50A; Voice + &#x1F4F3; Haptic Alert" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
-          <mxGeometry x="100" y="820" width="200" height="50" as="geometry" />
+          <mxGeometry x="100" y="855" width="200" height="50" as="geometry" />
         </mxCell>
 
-        <!-- ── ROUTE NAVIGATION (right column, centre x=760) ── -->
+        <!-- ═══════════════ ROUTE NAVIGATION (right column, centre x=1000) ═══════════════ -->
 
-        <mxCell id="20" value="Route Navigation" parent="1" vertex="1"
+        <mxCell id="20" value="&#x1F5FA;&#xFE0F; Route Navigation" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1;">
-          <mxGeometry x="680" y="260" width="200" height="50" as="geometry" />
+          <mxGeometry x="900" y="290" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="21" value="Set Destination" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
-          <mxGeometry x="680" y="350" width="200" height="50" as="geometry" />
+          <mxGeometry x="900" y="380" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="22" value="Fetch Route (OSRM)" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
-          <mxGeometry x="680" y="440" width="200" height="50" as="geometry" />
+          <mxGeometry x="900" y="470" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="23" value="Start Navigation Loop" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
-          <mxGeometry x="680" y="530" width="200" height="50" as="geometry" />
+          <mxGeometry x="900" y="560" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="24" value="Detect Obstacles" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
-          <mxGeometry x="680" y="620" width="200" height="50" as="geometry" />
+          <mxGeometry x="900" y="650" width="200" height="50" as="geometry" />
         </mxCell>
 
-        <mxCell id="25" value="Obstacle Ahead?" parent="1" vertex="1"
+        <mxCell id="25" value="Obstacle&#xa;Ahead?" parent="1" vertex="1"
           style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
-          <mxGeometry x="675" y="705" width="210" height="75" as="geometry" />
+          <mxGeometry x="895" y="740" width="210" height="80" as="geometry" />
         </mxCell>
 
-        <mxCell id="26" value="Warn User (Voice + Haptic)" parent="1" vertex="1"
+        <mxCell id="26" value="&#x1F4F3; &#x1F50A; Warn User" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;">
-          <mxGeometry x="560" y="820" width="200" height="50" as="geometry" />
+          <mxGeometry x="770" y="860" width="180" height="50" as="geometry" />
         </mxCell>
 
-        <mxCell id="27" value="Give Next Turn Instruction" parent="1" vertex="1"
+        <mxCell id="27" value="&#x1F50A; Next Turn Instruction" parent="1" vertex="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
-          <mxGeometry x="800" y="820" width="200" height="50" as="geometry" />
+          <mxGeometry x="1050" y="860" width="200" height="50" as="geometry" />
         </mxCell>
 
         <mxCell id="28" value="Arrived?" parent="1" vertex="1"
           style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
-          <mxGeometry x="675" y="910" width="210" height="75" as="geometry" />
+          <mxGeometry x="895" y="955" width="210" height="80" as="geometry" />
         </mxCell>
 
-        <mxCell id="29" value="Announce Arrival" parent="1" vertex="1"
+        <mxCell id="29" value="&#x1F389; You Have Arrived" parent="1" vertex="1"
           style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;">
-          <mxGeometry x="680" y="1025" width="200" height="55" as="geometry" />
+          <mxGeometry x="900" y="1075" width="200" height="60" as="geometry" />
         </mxCell>
 
-        <!-- ══════════════════ EDGES ══════════════════ -->
+        <!-- ══════════════════════════ EDGES ══════════════════════════ -->
 
-        <!-- App entry -->
+        <!-- App Launch → Home Screen -->
         <mxCell id="100" edge="1" source="2" target="3" parent="1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- Home → Object Detection -->
-        <mxCell id="101" edge="1" source="3" target="10" parent="1">
+        <!-- Home Screen → Object Detection -->
+        <mxCell id="101" value="Object Detection" edge="1" source="3" target="10" parent="1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="540" y="220" />
-              <mxPoint x="200" y="220" />
+              <mxPoint x="650" y="250" />
+              <mxPoint x="200" y="250" />
             </Array>
           </mxGeometry>
         </mxCell>
 
-        <!-- Home → Route Navigation -->
-        <mxCell id="102" edge="1" source="3" target="20" parent="1">
+        <!-- Home Screen → Route Navigation -->
+        <mxCell id="102" value="Navigation" edge="1" source="3" target="20" parent="1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="540" y="220" />
-              <mxPoint x="780" y="220" />
+              <mxPoint x="650" y="250" />
+              <mxPoint x="1000" y="250" />
             </Array>
           </mxGeometry>
         </mxCell>
@@ -151,17 +150,17 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- No → loop back to Capture Frame -->
+        <!-- Object Detected? No → loop to Capture Frame -->
         <mxCell id="114" value="No" edge="1" source="14" target="12" parent="1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="40" y="652" />
-              <mxPoint x="40" y="465" />
+              <mxPoint x="30" y="685" />
+              <mxPoint x="30" y="495" />
             </Array>
           </mxGeometry>
         </mxCell>
 
-        <!-- Yes → Get Depth -->
+        <!-- Object Detected? Yes → Get Depth -->
         <mxCell id="115" value="Yes" edge="1" source="14" target="15" parent="1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
@@ -174,8 +173,8 @@
         <mxCell id="117" edge="1" source="16" target="12" parent="1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="40" y="845" />
-              <mxPoint x="40" y="465" />
+              <mxPoint x="30" y="880" />
+              <mxPoint x="30" y="495" />
             </Array>
           </mxGeometry>
         </mxCell>
@@ -197,12 +196,12 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- Obstacle Yes → Warn -->
+        <!-- Obstacle? Yes → Warn -->
         <mxCell id="125" value="Yes" edge="1" source="25" target="26" parent="1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- Obstacle No → Next Turn -->
+        <!-- Obstacle? No → Next Turn -->
         <mxCell id="126" value="No" edge="1" source="25" target="27" parent="1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
@@ -217,17 +216,17 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- Arrived Yes → Announce -->
+        <!-- Arrived? Yes → Announce Arrival -->
         <mxCell id="129" value="Yes" edge="1" source="28" target="29" parent="1">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- Arrived No → loop back to Navigation Loop -->
+        <!-- Arrived? No → loop back to Navigation Loop -->
         <mxCell id="130" value="No" edge="1" source="28" target="23" parent="1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="940" y="947" />
-              <mxPoint x="940" y="555" />
+              <mxPoint x="1165" y="995" />
+              <mxPoint x="1165" y="585" />
             </Array>
           </mxGeometry>
         </mxCell>
