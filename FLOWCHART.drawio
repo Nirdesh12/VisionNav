@@ -1,0 +1,524 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile version="21.0.0">
+  <diagram name="VisionNav Flowchart" id="visionnav-flowchart">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1"
+                  connect="1" arrows="1" fold="1" page="1" pageScale="1"
+                  pageWidth="1900" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══════════════════════ APP ENTRY ═══════════════════════ -->
+
+        <!-- App Launch (Start) -->
+        <mxCell id="2" value="📱 App Launch" parent="1" vertex="1"
+          style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;">
+          <mxGeometry x="700" y="40" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Home Screen -->
+        <mxCell id="3" value="🏠 Home Screen" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;">
+          <mxGeometry x="700" y="150" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ OBJECT DETECTION NODES (col 1, centre x≈250) ═══════════════ -->
+
+        <!-- Module header -->
+        <mxCell id="10" value="🔍 Object Detection" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;">
+          <mxGeometry x="150" y="310" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Start ARKit camera -->
+        <mxCell id="11" value="Start ARKit Camera + LiDAR Session" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="150" y="400" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Capture frame -->
+        <mxCell id="12" value="Capture Frame (every 0.1 s)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="150" y="490" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Run YOLOv8 -->
+        <mxCell id="13" value="Run YOLOv8 Model&#xa;(yolov26s.mlmodel)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="150" y="580" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Object in Focus Box? -->
+        <mxCell id="14" value="Object in&#xa;Focus Box?" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="145" y="665" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Get depth -->
+        <mxCell id="15" value="Get Depth via LiDAR&#xa;(Statistical Filtering)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="150" y="785" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Classify distance -->
+        <mxCell id="16" value="Classify Distance&#xa;🔴 → 🟡 → 🟢 → 🩵" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="150" y="875" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Feedback Mode? -->
+        <mxCell id="17" value="Feedback Mode?" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="145" y="960" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Voice feedback -->
+        <mxCell id="18" value="🔊 Speak Object + Distance" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="10" y="1090" width="170" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Haptic feedback -->
+        <mxCell id="19" value="📳 Vibrate (∝ Distance)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;">
+          <mxGeometry x="320" y="1090" width="170" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ ROUTE NAVIGATION NODES (col 2, centre x≈800) ═══════════════ -->
+
+        <!-- Module header -->
+        <mxCell id="20" value="🗺️ Route Navigation" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;fontStyle=1;">
+          <mxGeometry x="700" y="310" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Set Destination? -->
+        <mxCell id="21" value="Set Destination?" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="695" y="400" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Text Search -->
+        <mxCell id="22" value="🔤 Text Search&#xa;(MKLocalSearch)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="560" y="520" width="180" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Voice Input -->
+        <mxCell id="23" value="🎤 Voice Input&#xa;(Speech Recognition)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="860" y="520" width="180" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- OSRM Routing -->
+        <mxCell id="24" value="Query OSRM&#xa;(OpenStreetMap Routing)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="610" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Parse Route -->
+        <mxCell id="25" value="Parse Route&#xa;(Waypoints &amp; Maneuvers)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="700" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Display Map -->
+        <mxCell id="26" value="Display Map + Route Polyline" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="790" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Navigation Loop -->
+        <mxCell id="27" value="Navigation Loop (every 0.25 s)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="880" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Capture depth frame -->
+        <mxCell id="28" value="Capture Frame + LiDAR Depth" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="970" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Run Seg Model -->
+        <mxCell id="29" value="Run YOLOv8 Seg Model&#xa;(yolov26s-seg.mlmodel)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="1060" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- 5-Zone FOV Analysis -->
+        <mxCell id="30" value="5-Zone FOV Analysis&#xa;(Centre · Left · Right · Near · Far)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="1150" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Obstacle? -->
+        <mxCell id="31" value="Obstacle&#xa;Detected?" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="695" y="1250" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Obstacle Warning -->
+        <mxCell id="32" value="📳 Directional Haptics&#xa;🔊 Zone Warning" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;">
+          <mxGeometry x="565" y="1370" width="190" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Stair Alert -->
+        <mxCell id="33" value="⚠️ Stair Alert&#xa;(Count Steps)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;">
+          <mxGeometry x="845" y="1370" width="170" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Every 12 s - Next Turn? -->
+        <mxCell id="34" value="Every 12 s:&#xa;Next Turn?" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="695" y="1470" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Speak Maneuver -->
+        <mxCell id="35" value="🔊 Speak Maneuver&#xa;('Turn left in 20 m')" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;">
+          <mxGeometry x="700" y="1590" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Arrived? -->
+        <mxCell id="36" value="Arrived? (&lt; 10 m)" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="695" y="1680" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- You have arrived (End) -->
+        <mxCell id="37" value="🎉 'You have arrived'&#xa;End Navigation" parent="1" vertex="1"
+          style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;">
+          <mxGeometry x="700" y="1800" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SETTINGS NODES (col 3, centre x≈1370) ═══════════════ -->
+
+        <!-- Module header -->
+        <mxCell id="50" value="⚙️ Settings" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=13;fontStyle=1;">
+          <mxGeometry x="1270" y="310" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Volume Slider -->
+        <mxCell id="51" value="Volume Slider&#xa;(System + App)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;">
+          <mxGeometry x="1270" y="400" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Speech Rate Slider -->
+        <mxCell id="52" value="Speech Rate Slider&#xa;(0.0 – 1.0)" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;">
+          <mxGeometry x="1270" y="490" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Decision: Select Feedback Mode -->
+        <mxCell id="53" value="Select&#xa;Feedback Mode" parent="1" vertex="1"
+          style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;">
+          <mxGeometry x="1265" y="575" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Voice Only -->
+        <mxCell id="54" value="🔊 Voice Only" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;">
+          <mxGeometry x="1130" y="700" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Haptic Only -->
+        <mxCell id="55" value="📳 Haptic Only" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;">
+          <mxGeometry x="1300" y="700" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Combined -->
+        <mxCell id="56" value="🔊📳 Combined" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;">
+          <mxGeometry x="1470" y="700" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Save to UserDefaults -->
+        <mxCell id="57" value="💾 Save to UserDefaults" parent="1" vertex="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;">
+          <mxGeometry x="1265" y="800" width="210" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ════════════════════════ EDGES: APP ENTRY ════════════════════════ -->
+
+        <!-- App Launch → Home Screen -->
+        <mxCell id="100" edge="1" source="2" target="3" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Home Screen → Object Detection (route left through hub point) -->
+        <mxCell id="101" value="Object Detection" edge="1" source="3" target="10" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="800" y="270" />
+              <mxPoint x="250" y="270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Home Screen → Route Navigation (straight down through hub point) -->
+        <mxCell id="102" value="Navigation" edge="1" source="3" target="20" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="800" y="270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Home Screen → Settings (route right through hub point) -->
+        <mxCell id="103" value="Settings" edge="1" source="3" target="50" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="800" y="270" />
+              <mxPoint x="1370" y="270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ════════════════════════ EDGES: OBJECT DETECTION ════════════════════════ -->
+
+        <mxCell id="110" edge="1" source="10" target="11" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="111" edge="1" source="11" target="12" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="112" edge="1" source="12" target="13" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="113" edge="1" source="13" target="14" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Decision No → loop back to Capture Frame (left side) -->
+        <mxCell id="114" value="No" edge="1" source="14" target="12" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="90" y="705" />
+              <mxPoint x="90" y="515" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Decision Yes → Get Depth -->
+        <mxCell id="115" value="Yes" edge="1" source="14" target="15" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="116" edge="1" source="15" target="16" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="117" edge="1" source="16" target="17" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Feedback Mode → Voice (or Combined) -->
+        <mxCell id="118" value="Voice / Combined" edge="1" source="17" target="18" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Feedback Mode → Haptic (or Combined) -->
+        <mxCell id="119" value="Haptic / Combined" edge="1" source="17" target="19" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Voice node → loop back to Capture Frame -->
+        <mxCell id="120" edge="1" source="18" target="12" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="30" y="1160" />
+              <mxPoint x="30" y="515" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Haptic node → loop back to Capture Frame -->
+        <mxCell id="121" edge="1" source="19" target="12" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="460" y="1160" />
+              <mxPoint x="460" y="515" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ════════════════════════ EDGES: ROUTE NAVIGATION ════════════════════════ -->
+
+        <mxCell id="140" edge="1" source="20" target="21" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Set Destination → Text Search -->
+        <mxCell id="141" value="Text" edge="1" source="21" target="22" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Set Destination → Voice Input -->
+        <mxCell id="142" value="Voice" edge="1" source="21" target="23" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Text Search → OSRM -->
+        <mxCell id="143" edge="1" source="22" target="24" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Voice Input → OSRM -->
+        <mxCell id="144" edge="1" source="23" target="24" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="145" edge="1" source="24" target="25" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="146" edge="1" source="25" target="26" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="147" edge="1" source="26" target="27" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="148" edge="1" source="27" target="28" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="149" edge="1" source="28" target="29" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="150" edge="1" source="29" target="30" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="151" edge="1" source="30" target="31" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Obstacle Decision → Obstacle Warning -->
+        <mxCell id="152" value="Obstacle" edge="1" source="31" target="32" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Obstacle Decision → Stair Alert -->
+        <mxCell id="153" value="Stairs" edge="1" source="31" target="33" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Obstacle Decision Clear → Turn Decision (right side bypass) -->
+        <mxCell id="154" value="Clear" edge="1" source="31" target="34" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="960" y="1290" />
+              <mxPoint x="960" y="1510" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Obstacle Warning → Turn Decision -->
+        <mxCell id="155" edge="1" source="32" target="34" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="570" y="1510" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Stair Alert → Turn Decision -->
+        <mxCell id="156" edge="1" source="33" target="34" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="960" y="1510" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Turn Decision Yes → Speak Maneuver -->
+        <mxCell id="157" value="Yes" edge="1" source="34" target="35" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Turn Decision No → Arrived Decision (right side bypass) -->
+        <mxCell id="158" value="No" edge="1" source="34" target="36" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="960" y="1510" />
+              <mxPoint x="960" y="1720" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Speak Maneuver → Arrived Decision -->
+        <mxCell id="159" edge="1" source="35" target="36" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Arrived Yes → End -->
+        <mxCell id="160" value="Yes" edge="1" source="36" target="37" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Arrived No → Nav Loop (loop back, left side) -->
+        <mxCell id="161" value="No" edge="1" source="36" target="27" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="630" y="1720" />
+              <mxPoint x="630" y="905" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ════════════════════════ EDGES: SETTINGS ════════════════════════ -->
+
+        <mxCell id="170" edge="1" source="50" target="51" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="171" edge="1" source="51" target="52" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="172" edge="1" source="52" target="53" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Feedback Mode → Voice Only -->
+        <mxCell id="173" value="Voice" edge="1" source="53" target="54" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Feedback Mode → Haptic Only -->
+        <mxCell id="174" value="Haptic" edge="1" source="53" target="55" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Feedback Mode → Combined -->
+        <mxCell id="175" value="Both" edge="1" source="53" target="56" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Voice Only → Save -->
+        <mxCell id="176" edge="1" source="54" target="57" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1200" y="835" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Haptic Only → Save -->
+        <mxCell id="177" edge="1" source="55" target="57" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Combined → Save -->
+        <mxCell id="178" edge="1" source="56" target="57" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1540" y="835" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
